@@ -1,0 +1,94 @@
+{
+  "ingredients": {
+    "apple": {
+      "calories": 52,
+      "protein": 0.3,
+      "carbs": 13.8,
+      "fat": 0.2,
+      "fiber": 2.4,
+      "serving_g": 150,
+      "emoji": "🍎"
+    },
+    "banana": {
+      "calories": 89,
+      "protein": 1.1,
+      "carbs": 22.8,
+      "fat": 0.3,
+      "fiber": 2.6,
+      "serving_g": 120,
+      "emoji": "🍌"
+    },
+    "carrot": {
+      "calories": 41,
+      "protein": 0.9,
+      "carbs": 9.6,
+      "fat": 0.2,
+      "fiber": 2.8,
+      "serving_g": 80,
+      "emoji": "🥕"
+    },
+    "tomato": {
+      "calories": 18,
+      "protein": 0.9,
+      "carbs": 3.9,
+      "fat": 0.2,
+      "fiber": 1.2,
+      "serving_g": 120,
+      "emoji": "🍅"
+    },
+    "egg": {
+      "calories": 155,
+      "protein": 13.0,
+      "carbs": 1.1,
+      "fat": 11.0,
+      "fiber": 0.0,
+      "serving_g": 50,
+      "emoji": "🥚"
+    },
+    "onion": {
+      "calories": 40,
+      "protein": 1.1,
+      "carbs": 9.3,
+      "fat": 0.1,
+      "fiber": 1.7,
+      "serving_g": 100,
+      "emoji": "🧅"
+    },
+    "lemon": {
+      "calories": 29,
+      "protein": 1.1,
+      "carbs": 9.3,
+      "fat": 0.3,
+      "fiber": 2.8,
+      "serving_g": 60,
+      "emoji": "🍋"
+    },
+    "bell pepper": {
+      "calories": 31,
+      "protein": 1.0,
+      "carbs": 6.0,
+      "fat": 0.3,
+      "fiber": 2.1,
+      "serving_g": 120,
+      "emoji": "🫑"
+    },
+    "cucumber": {
+      "calories": 15,
+      "protein": 0.7,
+      "carbs": 3.6,
+      "fat": 0.1,
+      "fiber": 0.5,
+      "serving_g": 150,
+      "emoji": "🥒"
+    },
+    "potato": {
+      "calories": 77,
+      "protein": 2.0,
+      "carbs": 17.0,
+      "fat": 0.1,
+      "fiber": 2.2,
+      "serving_g": 150,
+      "emoji": "🥔"
+    }
+  }
+}

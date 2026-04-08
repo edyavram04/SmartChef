@@ -1,0 +1,16 @@
+{
+  "name": "Smart Chef",
+  "short_name": "SmartChef",
+  "description": "AI-powered recipe recommendations via real-time ingredient detection",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#0a0a0f",
+  "background_color": "#0a0a0f",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+services:
+  smartchef-backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  smartchef-frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - smartchef-backend
+    restart: unless-stopped
