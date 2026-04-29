@@ -25,9 +25,10 @@ export default function RecipeModal({ recipe, nutrition, onClose }) {
         {/* Header image */}
         <div className="modal-header">
           <img
-            src={recipe.image || '/placeholder-food.svg'}
+            src={recipe.image?.replace(/^\//, '') || 'placeholder-food.svg'}
             alt={recipe.title}
             onError={(e) => {
+              e.target.onerror = null;
               e.target.src = `https://placehold.co/700x220/1a1a2e/22d3ee?text=${encodeURIComponent(recipe.title)}`;
             }}
           />
@@ -38,7 +39,20 @@ export default function RecipeModal({ recipe, nutrition, onClose }) {
         </div>
 
         <div className="modal-body">
-          <h2 className="modal-title">{recipe.title}</h2>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-xs)' }}>
+            <h2 className="modal-title" style={{ marginBottom: 0 }}>{recipe.title}</h2>
+            {recipe.video_url && (
+              <a 
+                href={recipe.video_url} 
+                target="_blank" 
+                rel="noreferrer" 
+                className="cam-btn" 
+                style={{ padding: '0.4rem 1rem', fontSize: '0.8rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+              >
+                <span>▶️</span> Watch Video
+              </a>
+            )}
+          </div>
 
           <div className="modal-meta">
             <span>⏱ {recipe.time_minutes} min</span>

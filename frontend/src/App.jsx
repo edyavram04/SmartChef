@@ -38,15 +38,27 @@ export default function App() {
         return [...combined].sort();
       });
     }
-
-    if (lastMessage.recipes) {
-      setRecipes(lastMessage.recipes);
-    }
-
-    if (lastMessage.nutrition) {
-      setNutrition(lastMessage.nutrition);
-    }
   }, [lastMessage]);
+
+  // Fetch recipes and nutrition dynamically when accumulated ingredients change
+  useEffect(() => {
+    if (ingredients.length > 0) {
+      fetch(`${API_BASE}/api/recipes/match?ingredients=${ingredients.join(',')}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.matches) setRecipes(data.matches);
+        })
+        .catch(console.error);
+
+      fetch(`${API_BASE}/api/nutrition?ingredients=${ingredients.join(',')}`)
+        .then((r) => r.json())
+        .then((data) => setNutrition(data))
+        .catch(console.error);
+    } else {
+      setRecipes([]);
+      setNutrition(null);
+    }
+  }, [ingredients]);
 
   // Periodically send frames when camera is active
   useEffect(() => {
@@ -72,28 +84,18 @@ export default function App() {
     setDetections([]);
   }, [stopCamera, disconnect]);
 
+  const handleAddIngredient = useCallback((name) => {
+    const trimmed = name.trim().toLowerCase();
+    if (trimmed) {
+      setIngredients((prev) => {
+        const combined = new Set([...prev, trimmed]);
+        return [...combined].sort();
+      });
+    }
+  }, []);
+
   const handleRemoveIngredient = useCallback((name) => {
     setIngredients((prev) => prev.filter((i) => i !== name));
-    // Re-fetch recipes for remaining ingredients
-    setIngredients((prev) => {
-      const remaining = prev.filter((i) => i !== name);
-      if (remaining.length > 0) {
-        fetch(`${API_BASE}/api/recipes/match?ingredients=${remaining.join(',')}`)
-          .then((r) => r.json())
-          .then((data) => {
-            if (data.matches) setRecipes(data.matches);
-          })
-          .catch(console.error);
-        fetch(`${API_BASE}/api/nutrition?ingredients=${remaining.join(',')}`)
-          .then((r) => r.json())
-          .then((data) => setNutrition(data))
-          .catch(console.error);
-      } else {
-        setRecipes([]);
-        setNutrition(null);
-      }
-      return remaining;
-    });
   }, []);
 
   // Close modal on Escape
@@ -122,6 +124,7 @@ export default function App() {
         <IngredientChips
           ingredients={ingredients}
           onRemove={handleRemoveIngredient}
+          onAdd={handleAddIngredient}
         />
 
         <section className="recipes-section">

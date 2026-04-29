@@ -11,10 +11,11 @@ export default function RecipeCard({ recipe, onClick, index }) {
     >
       <div className="recipe-card-image">
         <img
-          src={recipe.image || '/placeholder-food.svg'}
+          src={recipe.image?.replace(/^\//, '') || 'placeholder-food.svg'}
           alt={recipe.title}
           loading="lazy"
           onError={(e) => {
+            e.target.onerror = null;
             e.target.src = `https://placehold.co/400x250/1a1a2e/22d3ee?text=${encodeURIComponent(recipe.title)}`;
           }}
         />

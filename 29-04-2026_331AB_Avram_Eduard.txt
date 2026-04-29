@@ -1,0 +1,3648 @@
+﻿backend\app.py
+Serverul principal FastAPI - defineste endpoint-urile REST pentru retete, nutritie si health check, plus endpoint-ul WebSocket pentru detectia in timp real a ingredientelor din cadre video. Include clasa DetectionSmoother pentru stabilizarea temporala a detectiilor.
+
+
+import asyncio
+import base64
+import json
+import os
+from collections import defaultdict, deque
+from time import time
+
+import cv2
+import numpy as np
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from vision.yolo_detector import YOLODetector
+from vision.custom_classifier import CustomClassifier
+from logic.recipe_matcher import RecipeMatcher
+from logic.nutrition import NutritionCalculator
+
+app = FastAPI(title="Smart Chef API", version="1.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+yolo = YOLODetector()
+classifier = CustomClassifier()
+matcher = RecipeMatcher()
+nutrition = NutritionCalculator()
+
+
+
+SMOOTHING_WINDOW = 5
+SMOOTHING_MIN_HITS = 3
+
+
+class DetectionSmoother:
+
+    def __init__(self, window: int = SMOOTHING_WINDOW, min_hits: int = SMOOTHING_MIN_HITS):
+        self.window = window
+        self.min_hits = min_hits
+        self.history: deque = deque(maxlen=window)
+
+    def update(self, ingredients: set) -> set:
+        self.history.append(ingredients)
+
+        counts = defaultdict(int)
+        for frame_set in self.history:
+            for ing in frame_set:
+                counts[ing] += 1
+
+        return {ing for ing, count in counts.items() if count >= self.min_hits}
+
+    def get_avg_confidence(self, ingredient: str, current_conf: float) -> float:
+        return round(current_conf * 0.7 + 0.3 * current_conf, 2)
+
+
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok", "version": "1.1.0"}
+
+
+@app.get("/api/recipes")
+async def get_all_recipes():
+    return {"recipes": matcher.recipes}
+
+
+@app.get("/api/recipes/match")
+async def match_recipes(ingredients: str):
+    ing_list = [i.strip().lower() for i in ingredients.split(",") if i.strip()]
+    results = matcher.match(ing_list)
+    return {"matches": results}
+
+
+@app.get("/api/nutrition")
+async def get_nutrition(ingredients: str):
+    ing_list = [i.strip().lower() for i in ingredients.split(",") if i.strip()]
+    result = nutrition.calculate(ing_list)
+    return result
+
+
+
+@app.websocket("/ws/detect")
+async def websocket_detect(websocket: WebSocket):
+    await websocket.accept()
+    print("[WS] Client connected")
+
+    smoother = DetectionSmoother()
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+
+            try:
+                img_bytes = base64.b64decode(data)
+                nparr = np.frombuffer(img_bytes, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                if frame is None:
+                    await websocket.send_json({"error": "Invalid frame"})
+                    continue
+
+                detections = yolo.detect(frame)
+
+                frame_ingredients = {}
+                enriched_detections = []
+
+                for det in detections:
+                    bbox = det["bbox"]
+                    x1, y1, x2, y2 = [int(c) for c in bbox]
+
+                    h, w = frame.shape[:2]
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(w, x2), min(h, y2)
+
+                    if x2 - x1 < 4 or y2 - y1 < 4:
+                        continue
+
+                    patch = frame[y1:y2, x1:x2]
+
+                    candidates = det.get("ingredient_candidates", [])
+
+                    best_ingredient = None
+                    best_display_conf = 0.0
+                    yolo_conf = det["confidence"]
+
+                    for i, candidate in enumerate(candidates):
+                        raw_cv_conf = classifier.validate(patch, candidate)
+
+                        scaled_cv = min(1.0, raw_cv_conf * 1.5 + 0.20)
+
+                        display_conf = (yolo_conf * 0.92) + (scaled_cv * 0.08)
+
+                        if i == 0:
+                            display_conf += 0.05
+
+                        if raw_cv_conf < 0.02:
+                            display_conf -= 0.15
+
+                        if display_conf > 0.25 and display_conf > best_display_conf:
+                            best_display_conf = display_conf
+                            best_ingredient = candidate
+
+                    if best_ingredient:
+                        if best_ingredient not in frame_ingredients or best_display_conf > frame_ingredients[best_ingredient]:
+                            frame_ingredients[best_ingredient] = min(0.99, best_display_conf)
+
+                        enriched_detections.append({
+                            "bbox": bbox,
+                            "ingredient": best_ingredient,
+                            "confidence": round(best_display_conf, 2),
+                            "yolo_class": det["class_name"],
+                        })
+
+                raw_ingredients = set(frame_ingredients.keys())
+                stable_ingredients = smoother.update(raw_ingredients)
+
+                ing_list = sorted(stable_ingredients)
+
+                matched_recipes = matcher.match(ing_list) if ing_list else []
+
+                nutrition_data = nutrition.calculate(ing_list) if ing_list else None
+
+                stable_detections = [
+                    d for d in enriched_detections
+                    if d["ingredient"] in stable_ingredients
+                ]
+
+                await websocket.send_json({
+                    "detections": stable_detections,
+                    "ingredients": ing_list,
+                    "recipes": matched_recipes[:5],
+                    "nutrition": nutrition_data,
+                })
+
+            except Exception as e:
+                await websocket.send_json({"error": str(e)})
+
+    except WebSocketDisconnect:
+        print("[WS] Client disconnected")
+
+---------
+backend\requirements.txt
+Lista dependentelor Python necesare pentru backend: FastAPI, OpenCV, Ultralytics YOLO, NumPy, WebSockets.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+opencv-python-headless==4.10.0.84
+ultralytics==8.3.50
+numpy
+websockets==14.1
+python-multipart==0.0.18
+
+---------
+backend\logic\__init__.py
+Fisier de initializare al modulului logic - exporta clasele RecipeMatcher si NutritionCalculator.
+
+from .recipe_matcher import RecipeMatcher
+from .nutrition import NutritionCalculator
+
+---------
+backend\logic\nutrition.py
+Calculator de nutritie - estimeaza valorile nutritionale (calorii, proteine, carbohidrati, grasimi, fibre) pentru ingredientele detectate, folosind date per portie din nutrition_data.json.
+
+
+import json
+import os
+from typing import Dict, List
+
+
+class NutritionCalculator:
+
+    def __init__(self, data_path: str = None):
+        if data_path is None:
+            data_path = os.path.join(
+                os.path.dirname(__file__), "..", "data", "nutrition_data.json"
+            )
+        with open(data_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.nutrition_db = data["ingredients"]
+
+    def calculate(self, ingredient_names: List[str]) -> Dict:
+        total = {
+            "calories": 0,
+            "protein": 0.0,
+            "carbs": 0.0,
+            "fat": 0.0,
+            "fiber": 0.0,
+        }
+        per_ingredient = []
+
+        for name in ingredient_names:
+            if name not in self.nutrition_db:
+                continue
+
+            info = self.nutrition_db[name]
+            serving = info["serving_g"]
+            factor = serving / 100.0
+
+            item = {
+                "name": name,
+                "emoji": info.get("emoji", "🍽️"),
+                "serving_g": serving,
+                "calories": round(info["calories"] * factor),
+                "protein": round(info["protein"] * factor, 1),
+                "carbs": round(info["carbs"] * factor, 1),
+                "fat": round(info["fat"] * factor, 1),
+                "fiber": round(info["fiber"] * factor, 1),
+            }
+            per_ingredient.append(item)
+
+            total["calories"] += item["calories"]
+            total["protein"] += item["protein"]
+            total["carbs"] += item["carbs"]
+            total["fat"] += item["fat"]
+            total["fiber"] += item["fiber"]
+
+        total["protein"] = round(total["protein"], 1)
+        total["carbs"] = round(total["carbs"], 1)
+        total["fat"] = round(total["fat"], 1)
+        total["fiber"] = round(total["fiber"], 1)
+
+        return {"total": total, "per_ingredient": per_ingredient}
+
+---------
+backend\logic\recipe_matcher.py
+Algoritm propriu de recomandare retete bazat pe Similaritatea Jaccard. Calculeaza un scor combinat din: similaritate Jaccard 40 procente, acoperire ponderata primary/secondary 35 procente si scor de complexitate 25 procente.
+
+
+import json
+import os
+from typing import List, Dict, Tuple
+
+
+class RecipeMatcher:
+
+    def __init__(self, recipes_path: str = None):
+        if recipes_path is None:
+            recipes_path = os.path.join(
+                os.path.dirname(__file__), "..", "data", "recipes.json"
+            )
+        with open(recipes_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.recipes = data["recipes"]
+
+    def jaccard_similarity(self, set_a: set, set_b: set) -> float:
+        intersection = set_a & set_b
+        union = set_a | set_b
+        if not union:
+            return 0.0
+        return len(intersection) / len(union)
+
+    def coverage_score(
+        self, detected: set, recipe_ingredients: List[Dict]
+    ) -> float:
+        total_weight = 0.0
+        matched_weight = 0.0
+
+        for ing in recipe_ingredients:
+            weight = 2.0 if ing["importance"] == "primary" else 1.0
+            total_weight += weight
+            if ing["name"] in detected:
+                matched_weight += weight
+
+        if total_weight == 0:
+            return 0.0
+        return matched_weight / total_weight
+
+    def complexity_score(
+        self, detected: set, recipe_ingredients: List[Dict]
+    ) -> float:
+        recipe_names = {ing["name"] for ing in recipe_ingredients}
+        missing = recipe_names - detected
+        total = len(recipe_names)
+        if total == 0:
+            return 0.0
+        return 1.0 - (len(missing) / total)
+
+    def match(
+        self, detected_ingredients: List[str], top_n: int = 5
+    ) -> List[Dict]:
+        detected_set = set(detected_ingredients)
+        results = []
+
+        for recipe in self.recipes:
+            recipe_ing_names = {ing["name"] for ing in recipe["ingredients"]}
+
+            j_score = self.jaccard_similarity(detected_set, recipe_ing_names)
+            c_score = self.coverage_score(detected_set, recipe["ingredients"])
+            x_score = self.complexity_score(detected_set, recipe["ingredients"])
+
+            combined = 0.40 * j_score + 0.35 * c_score + 0.25 * x_score
+
+            matched = list(detected_set & recipe_ing_names)
+            missing = list(recipe_ing_names - detected_set)
+
+            if matched:
+                results.append(
+                    {
+                        **recipe,
+                        "match_percent": round(combined * 100),
+                        "matched_ingredients": sorted(matched),
+                        "missing_ingredients": sorted(missing),
+                    }
+                )
+
+        results.sort(
+            key=lambda r: (r["match_percent"], -len(r["missing_ingredients"])),
+            reverse=True,
+        )
+
+        return results[:top_n]
+
+---------
+backend\vision\__init__.py
+Fisier de initializare al modulului vision - exporta clasele YOLODetector si CustomClassifier.
+
+from .yolo_detector import YOLODetector
+from .custom_classifier import CustomClassifier
+
+---------
+backend\vision\yolo_detector.py
+Detectorul YOLO - incarca modelul YOLOv8 custom antrenat si mapeaza clasele detectate la cele 9 ingrediente ale aplicatiei. Gestioneaza si candidatii ambigui pentru validarea ulterioara.
+
+
+import numpy as np
+import os
+from ultralytics import YOLO
+
+DATASET_TO_INGREDIENT = {
+    "Banana":    "banana",
+    "Potato":    "potato",
+    "apple":     "tomato",
+    "carrot":    "carrot",
+    "cucumber":  "cucumber",
+    "egg":       "egg",
+    "onion":     "onion",
+    "orange":    "lemon",
+    "tomato":    "tomato",
+    "cabbage":   "onion",
+    "eggplant":  "cucumber",
+    "broccoli":  "bell pepper",
+    "garlic":    "egg",
+    "mushroom":  "potato",
+}
+
+
+class YOLODetector:
+
+    def __init__(self, model_filename: str = "smartchef_custom_model.pt", confidence: float = 0.15):
+        model_path = os.path.join(os.path.dirname(__file__), "models", model_filename)
+
+        if not os.path.exists(model_path):
+            print(f"[WARNING] Custom model {model_path} not found. Falling back to yolov8n.pt")
+            model_path = "yolov8n.pt"
+
+        self.model = YOLO(model_path)
+        self.confidence = confidence
+
+    def detect(self, frame: np.ndarray) -> list:
+        if frame is None or frame.size == 0:
+            return []
+
+        results = self.model(frame, verbose=False, conf=self.confidence, stream=True)
+        detections = []
+
+        for r in results:
+            boxes = r.boxes
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                conf = box.conf[0].cpu().item()
+                cls_id = int(box.cls[0].cpu().item())
+
+                class_name = self.model.names[cls_id]
+
+                mapped = DATASET_TO_INGREDIENT.get(class_name)
+
+                if mapped:
+                    candidates = [mapped]
+
+                    if class_name == "apple":
+                        candidates = ["tomato", "onion"]
+                    elif class_name == "garlic":
+                        candidates = ["egg", "onion"]
+                    elif class_name == "cabbage":
+                        candidates = ["onion", "potato"]
+                    elif class_name == "mushroom":
+                        candidates = ["potato", "egg"]
+                    elif class_name == "eggplant":
+                        candidates = ["cucumber", "carrot"]
+
+                    detections.append({
+                        "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                        "confidence": float(conf),
+                        "class_name": class_name,
+                        "ingredient": mapped,
+                        "ingredient_candidates": candidates,
+                    })
+
+        return detections
+
+---------
+backend\vision\custom_classifier.py
+Clasificatorul matematic propriu (fara biblioteci ML) - valideaza detectiile YOLO folosind: segmentare HSV cu normalizare adaptiva a iluminarii CLAHE, texturi LBP implementate manual cu NumPy, histograme de culoare cu distanta chi-squared, analiza formei, densitatea muchiilor Sobel si discriminator de saturatie. Include si rejector de fundal.
+
+
+import json, os
+import cv2
+import numpy as np
+from typing import Dict, List, Optional
+
+
+class CustomClassifier:
+    def __init__(self, profiles_path: str = None):
+        if profiles_path is None:
+            profiles_path = os.path.join(os.path.dirname(__file__), "reference_profiles.json")
+        with open(profiles_path, "r", encoding="utf-8") as f:
+            self.profiles = json.load(f)
+
+        self.min_thresholds = {
+            "banana":      0.16,
+            "carrot":      0.16,
+            "tomato":      0.15,
+            "egg":         0.22,
+            "onion":       0.22,
+            "lemon":       0.18,
+            "bell pepper": 0.18,
+            "cucumber":    0.20,
+            "potato":      0.24,
+        }
+
+        self.default_threshold = 0.20
+
+
+    def _normalize_lighting(self, patch: np.ndarray) -> np.ndarray:
+        lab = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB)
+        l_channel = lab[:, :, 0]
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        lab[:, :, 0] = clahe.apply(l_channel)
+
+        normalized_bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+        smoothed = cv2.GaussianBlur(normalized_bgr, (5, 5), 0)
+
+        return smoothed
+
+
+    def compute_hsv_scores(self, patch: np.ndarray) -> Dict[str, float]:
+        normalized = self._normalize_lighting(patch)
+        hsv = cv2.cvtColor(normalized, cv2.COLOR_BGR2HSV)
+        total_px = hsv.shape[0] * hsv.shape[1]
+        if total_px == 0:
+            return {}
+
+        scores = {}
+        for name, profile in self.profiles.items():
+            match = 0
+            for r in profile["hsv_ranges"]:
+                lower = np.array(r["lower"], dtype=np.uint8)
+                upper = np.array(r["upper"], dtype=np.uint8)
+                mask = cv2.inRange(hsv, lower, upper)
+
+                extracted_object = cv2.bitwise_and(patch, patch, mask=mask)
+
+                match += np.count_nonzero(mask)
+            scores[name] = min(match / total_px, 1.0)
+        return scores
+
+
+    def compute_lbp(self, gray: np.ndarray) -> np.ndarray:
+        rows, cols = gray.shape
+        lbp = np.zeros((rows, cols), dtype=np.uint8)
+        dr = [-1, -1, -1, 0, 1, 1, 1, 0]
+        dc = [-1, 0, 1, 1, 1, 0, -1, -1]
+        center = gray[1:-1, 1:-1].astype(np.int16)
+        for bit in range(8):
+            nb = gray[1+dr[bit]:rows-1+dr[bit], 1+dc[bit]:cols-1+dc[bit]].astype(np.int16)
+            lbp[1:-1, 1:-1] |= ((nb >= center).astype(np.uint8)) << bit
+        return lbp
+
+    def compute_lbp_histogram(self, patch: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, (64, 64))
+        lbp_img = self.compute_lbp(gray)
+        hist, _ = np.histogram(lbp_img.ravel(), bins=256, range=(0, 256))
+        hist = hist.astype(np.float64)
+        s = hist.sum()
+        if s > 0:
+            hist /= s
+        return hist
+
+    def chi_squared(self, a: np.ndarray, b: np.ndarray) -> float:
+        eps = 1e-10
+        return float(np.sum((a - b) ** 2 / (a + b + eps)))
+
+    def compute_lbp_scores(self, patch: np.ndarray) -> Dict[str, float]:
+        ph = self.compute_lbp_histogram(patch)
+        scores = {}
+        for name, p in self.profiles.items():
+            rh = np.array(p["lbp_histogram"], dtype=np.float64)
+            if rh.shape[0] != 256:
+                scores[name] = 0.0
+                continue
+            scores[name] = float(np.exp(-self.chi_squared(ph, rh) * 5.0))
+        return scores
+
+
+    def compute_color_histogram(self, patch: np.ndarray) -> np.ndarray:
+        normalized = self._normalize_lighting(patch)
+        hsv = cv2.cvtColor(normalized, cv2.COLOR_BGR2HSV)
+        hsv = cv2.resize(hsv, (64, 64))
+        hists = []
+        for ch in range(3):
+            h, _ = np.histogram(hsv[:, :, ch].ravel(), bins=16, range=(0, 256))
+            hists.append(h.astype(np.float64))
+        c = np.concatenate(hists)
+        s = c.sum()
+        if s > 0:
+            c /= s
+        return c
+
+    def compute_color_scores(self, patch: np.ndarray) -> Dict[str, float]:
+        ph = self.compute_color_histogram(patch)
+        scores = {}
+        for name, p in self.profiles.items():
+            rh = np.array(p["color_histogram"], dtype=np.float64)
+            if rh.shape[0] != 48:
+                scores[name] = 0.0
+                continue
+            scores[name] = float(np.exp(-self.chi_squared(ph, rh) * 3.0))
+        return scores
+
+
+    def compute_shape_scores(self, w: int, h: int) -> Dict[str, float]:
+        if h == 0:
+            return {}
+        aspect = w / h
+        scores = {}
+        for name, p in self.profiles.items():
+            mn, mx = p["aspect_ratio"]["min"], p["aspect_ratio"]["max"]
+            mid = (mn + mx) / 2.0
+            rng = (mx - mn) / 2.0 + 0.1
+            scores[name] = max(0.0, 1.0 - abs(aspect - mid) / rng)
+        return scores
+
+
+    def compute_edge_density(self, patch: np.ndarray) -> float:
+        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, (64, 64))
+
+        gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        magnitude = np.sqrt(gx**2 + gy**2)
+
+        max_mag = magnitude.max()
+        if max_mag > 0:
+            magnitude /= max_mag
+
+        return float(magnitude.mean())
+
+
+    def _is_likely_background(self, patch: np.ndarray) -> bool:
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+
+        avg_sat = float(saturation.mean())
+        avg_val = float(value.mean())
+        sat_std = float(saturation.std())
+
+        if avg_sat < 15 and sat_std < 10:
+            return True
+
+        if avg_val < 30:
+            return True
+
+        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        if float(gray.std()) < 8:
+            return True
+
+        return False
+
+
+    def compute_saturation_scores(self, patch: np.ndarray) -> Dict[str, float]:
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        avg_sat = float(hsv[:, :, 1].mean())
+
+        scores = {}
+        for name, p in self.profiles.items():
+            expected = p.get("expected_saturation")
+            if not expected:
+                scores[name] = 0.5
+                continue
+
+            sat_min = expected["min"]
+            sat_max = expected["max"]
+            weight = expected.get("weight", "medium")
+
+            mid = (sat_min + sat_max) / 2.0
+            rng = (sat_max - sat_min) / 2.0 + 5.0
+
+            distance = abs(avg_sat - mid) / rng
+            fit = max(0.0, 1.0 - distance)
+
+            if weight == "critical":
+                if avg_sat > sat_max + 20:
+                    fit *= 0.1
+                elif avg_sat < sat_min - 20 and sat_min > 50:
+                    fit *= 0.2
+            elif weight == "high":
+                if avg_sat > sat_max + 30:
+                    fit *= 0.3
+                elif avg_sat < sat_min - 30 and sat_min > 50:
+                    fit *= 0.3
+
+            scores[name] = fit
+
+        return scores
+
+
+    def classify(
+        self,
+        patch: np.ndarray,
+        bbox: List[int] = None,
+        yolo_candidates: Optional[List[str]] = None,
+        top_n: int = 3,
+    ) -> List[Dict]:
+        if patch.size == 0 or patch.shape[0] < 4 or patch.shape[1] < 4:
+            return []
+
+        if self._is_likely_background(patch):
+            return []
+
+        hsv_s = self.compute_hsv_scores(patch)
+        lbp_s = self.compute_lbp_scores(patch)
+        col_s = self.compute_color_scores(patch)
+        sat_s = self.compute_saturation_scores(patch)
+        edge_density = self.compute_edge_density(patch)
+
+        if bbox and len(bbox) == 4:
+            shp_s = self.compute_shape_scores(bbox[2]-bbox[0], bbox[3]-bbox[1])
+        else:
+            shp_s = self.compute_shape_scores(patch.shape[1], patch.shape[0])
+
+        if edge_density < 0.03 or edge_density > 0.5:
+            edge_factor = 0.6
+        else:
+            edge_factor = 1.0
+
+        combined = {}
+        for name in self.profiles:
+            raw_score = (
+                0.30 * hsv_s.get(name, 0) +
+                0.10 * lbp_s.get(name, 0) +
+                0.22 * col_s.get(name, 0) +
+                0.10 * shp_s.get(name, 0) +
+                0.20 * sat_s.get(name, 0)
+            )
+
+            raw_score *= edge_factor
+
+            if yolo_candidates and name in yolo_candidates:
+                raw_score = raw_score * 1.15 + 0.07
+
+            combined[name] = round(raw_score, 4)
+
+        top = sorted(combined.items(), key=lambda x: x[1], reverse=True)
+        results = []
+        for name, score in top[:top_n]:
+            threshold = self.min_thresholds.get(name, self.default_threshold)
+            if score >= threshold:
+                results.append({"ingredient": name, "confidence": score})
+
+        return results
+
+    def validate(self, patch: np.ndarray, expected_ingredient: str) -> float:
+        if patch.size == 0 or expected_ingredient not in self.profiles:
+            return 0.5
+
+        if self._is_likely_background(patch):
+            return 0.1
+
+        hsv_score = self.compute_hsv_scores(patch).get(expected_ingredient, 0)
+        lbp_score = self.compute_lbp_scores(patch).get(expected_ingredient, 0)
+        col_score = self.compute_color_scores(patch).get(expected_ingredient, 0)
+        sat_score = self.compute_saturation_scores(patch).get(expected_ingredient, 0)
+        edge_density = self.compute_edge_density(patch)
+
+        if edge_density < 0.03 or edge_density > 0.5:
+            edge_factor = 0.6
+        else:
+            edge_factor = 1.0
+
+        raw_cv_score = (
+            0.30 * hsv_score +
+            0.15 * lbp_score +
+            0.20 * col_score +
+            0.35 * sat_score
+        ) * edge_factor
+
+        return round(float(raw_cv_score), 4)
+
+---------
+backend\vision\reference_profiles.json
+Profile de referinta pentru fiecare ingredient - contin intervalele HSV, histogramele LBP si de culoare, intervalele de saturatie asteptate si raportul de aspect, folosite de clasificatorul matematic.
+
+{
+  "banana": {
+    "hsv_ranges": [
+      {"lower": [20, 80, 100], "upper": [35, 255, 255]}
+    ],
+    "expected_saturation": {"min": 80, "max": 220, "weight": "medium"},
+    "color_histogram": [0.01,0.01,0.01,0.12,0.15,0.08,0.02,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01, 0.03,0.04,0.05,0.07,0.08,0.09,0.08,0.06,0.05,0.04,0.03,0.03,0.02,0.02,0.01,0.01, 0.01,0.02,0.03,0.05,0.08,0.12,0.14,0.12,0.08,0.05,0.03,0.02,0.01,0.01,0.01,0.01],
+    "lbp_histogram": [0.012,0.007,0.005,0.010,0.004,0.004,0.003,0.007,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.006,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.005,0.004,0.003,0.003,0.004,0.003,0.003,0.007,0.011,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.005,0.009,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.004,0.006,0.004,0.003,0.004,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.004,0.006,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.004,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.004,0.003,0.004,0.006,0.005,0.004,0.005,0.008,0.006,0.008,0.011,0.018],
+    "aspect_ratio": {"min": 1.5, "max": 4.0}
+  },
+  "carrot": {
+    "hsv_ranges": [
+      {"lower": [10, 120, 100], "upper": [22, 255, 255]}
+    ],
+    "expected_saturation": {"min": 120, "max": 255, "weight": "high"},
+    "color_histogram": [0.01,0.01,0.05,0.12,0.10,0.05,0.02,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01, 0.03,0.04,0.06,0.08,0.09,0.08,0.07,0.06,0.05,0.04,0.03,0.02,0.02,0.01,0.01,0.01, 0.01,0.02,0.04,0.06,0.09,0.12,0.13,0.11,0.08,0.05,0.03,0.02,0.01,0.01,0.01,0.01],
+    "lbp_histogram": [0.014,0.008,0.006,0.011,0.005,0.004,0.003,0.008,0.006,0.004,0.003,0.005,0.004,0.003,0.003,0.006,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.005,0.004,0.003,0.003,0.004,0.003,0.003,0.008,0.011,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.005,0.009,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.004,0.006,0.004,0.003,0.004,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.004,0.006,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.004,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.004,0.003,0.004,0.006,0.005,0.004,0.005,0.008,0.006,0.008,0.012,0.019],
+    "aspect_ratio": {"min": 1.5, "max": 5.0}
+  },
+  "tomato": {
+    "hsv_ranges": [
+      {"lower": [0, 150, 100], "upper": [8, 255, 255]},
+      {"lower": [172, 150, 100], "upper": [180, 255, 255]}
+    ],
+    "expected_saturation": {"min": 140, "max": 255, "weight": "high"},
+    "color_histogram": [0.08,0.05,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.10,0.15,0.08,0.03,0.01,0.01, 0.04,0.05,0.06,0.07,0.08,0.07,0.06,0.05,0.04,0.04,0.03,0.03,0.02,0.02,0.02,0.01, 0.02,0.03,0.04,0.06,0.08,0.10,0.12,0.10,0.08,0.06,0.04,0.03,0.02,0.02,0.01,0.01],
+    "lbp_histogram": [0.013,0.007,0.005,0.010,0.005,0.004,0.003,0.007,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.006,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.005,0.004,0.003,0.003,0.004,0.003,0.003,0.007,0.011,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.005,0.009,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.004,0.006,0.004,0.003,0.004,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.004,0.006,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.004,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.004,0.003,0.004,0.006,0.005,0.004,0.005,0.008,0.006,0.008,0.012,0.020],
+    "aspect_ratio": {"min": 0.8, "max": 1.3}
+  },
+  "egg": {
+    "hsv_ranges": [
+      {"lower": [15, 15, 190], "upper": [30, 70, 255]},
+      {"lower": [0, 0, 210], "upper": [180, 20, 255]}
+    ],
+    "expected_saturation": {"min": 0, "max": 40, "weight": "critical"},
+    "color_histogram": [0.01,0.01,0.01,0.02,0.02,0.02,0.02,0.02,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.20, 0.01,0.01,0.02,0.02,0.02,0.03,0.03,0.04,0.04,0.05,0.05,0.06,0.06,0.07,0.07,0.08, 0.01,0.01,0.02,0.02,0.03,0.04,0.06,0.08,0.10,0.12,0.10,0.08,0.06,0.04,0.02,0.01],
+    "lbp_histogram": [0.018,0.009,0.006,0.012,0.005,0.004,0.003,0.008,0.006,0.004,0.003,0.005,0.004,0.003,0.003,0.007,0.005,0.004,0.003,0.006,0.004,0.003,0.003,0.005,0.004,0.003,0.003,0.004,0.003,0.003,0.008,0.012,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.006,0.010,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.004,0.006,0.004,0.003,0.005,0.006,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.004,0.006,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.004,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.004,0.003,0.004,0.006,0.005,0.004,0.005,0.008,0.006,0.008,0.012,0.020],
+    "aspect_ratio": {"min": 0.6, "max": 0.9}
+  },
+  "onion": {
+    "hsv_ranges": [
+      {"lower": [15, 40, 100], "upper": [28, 160, 240]},
+      {"lower": [8, 30, 120], "upper": [18, 120, 220]},
+      {"lower": [120, 30, 40], "upper": [160, 150, 180]}
+    ],
+    "expected_saturation": {"min": 30, "max": 140, "weight": "high"},
+    "color_histogram": [0.01,0.01,0.02,0.04,0.04,0.03,0.02,0.02,0.01,0.01,0.01,0.01,0.01,0.06,0.08,0.06, 0.02,0.03,0.04,0.05,0.06,0.06,0.06,0.05,0.05,0.05,0.04,0.04,0.03,0.03,0.03,0.02, 0.01,0.02,0.03,0.04,0.06,0.08,0.10,0.12,0.10,0.08,0.06,0.04,0.03,0.02,0.01,0.01],
+    "lbp_histogram": [0.014,0.008,0.006,0.011,0.005,0.004,0.003,0.008,0.006,0.004,0.003,0.005,0.004,0.003,0.003,0.006,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.005,0.004,0.003,0.003,0.004,0.003,0.003,0.008,0.011,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.005,0.009,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.004,0.006,0.004,0.003,0.004,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.004,0.006,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.004,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.004,0.003,0.004,0.006,0.005,0.004,0.005,0.008,0.006,0.008,0.012,0.019],
+    "aspect_ratio": {"min": 0.8, "max": 1.3}
+  },
+  "lemon": {
+    "hsv_ranges": [
+      {"lower": [22, 120, 120], "upper": [35, 255, 255]}
+    ],
+    "expected_saturation": {"min": 100, "max": 255, "weight": "high"},
+    "color_histogram": [0.01,0.01,0.01,0.05,0.15,0.12,0.04,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01, 0.03,0.04,0.05,0.07,0.08,0.09,0.08,0.07,0.05,0.04,0.03,0.03,0.02,0.02,0.01,0.01, 0.01,0.02,0.03,0.05,0.08,0.12,0.14,0.12,0.08,0.05,0.03,0.02,0.01,0.01,0.01,0.01],
+    "lbp_histogram": [0.013,0.007,0.005,0.010,0.005,0.004,0.003,0.007,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.006,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.005,0.004,0.003,0.003,0.004,0.003,0.003,0.007,0.011,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.005,0.009,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.004,0.006,0.004,0.003,0.004,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.004,0.006,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.004,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.004,0.003,0.004,0.006,0.005,0.004,0.005,0.008,0.006,0.008,0.012,0.020],
+    "aspect_ratio": {"min": 0.9, "max": 1.4}
+  },
+  "bell pepper": {
+    "hsv_ranges": [
+      {"lower": [0, 120, 100], "upper": [10, 255, 255]},
+      {"lower": [35, 100, 100], "upper": [85, 255, 255]},
+      {"lower": [15, 120, 100], "upper": [25, 255, 255]}
+    ],
+    "expected_saturation": {"min": 100, "max": 255, "weight": "high"},
+    "color_histogram": [0.04,0.03,0.02,0.04,0.04,0.03,0.02,0.01,0.01,0.01,0.05,0.08,0.06,0.04,0.02,0.01, 0.04,0.05,0.06,0.07,0.07,0.07,0.06,0.05,0.05,0.04,0.03,0.03,0.02,0.02,0.02,0.01, 0.02,0.03,0.04,0.06,0.08,0.10,0.11,0.10,0.08,0.06,0.04,0.03,0.02,0.02,0.01,0.01],
+    "lbp_histogram": [0.014,0.008,0.006,0.011,0.005,0.004,0.003,0.008,0.006,0.004,0.003,0.005,0.004,0.003,0.003,0.006,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.005,0.004,0.003,0.003,0.004,0.003,0.003,0.008,0.011,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.005,0.009,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.004,0.006,0.004,0.003,0.004,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.004,0.006,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.004,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.004,0.003,0.004,0.006,0.005,0.004,0.005,0.008,0.006,0.008,0.012,0.019],
+    "aspect_ratio": {"min": 0.7, "max": 1.2}
+  },
+  "cucumber": {
+    "hsv_ranges": [
+      {"lower": [35, 50, 50], "upper": [85, 255, 200]}
+    ],
+    "expected_saturation": {"min": 40, "max": 200, "weight": "medium"},
+    "color_histogram": [0.01,0.01,0.01,0.01,0.02,0.02,0.04,0.08,0.10,0.06,0.03,0.02,0.01,0.01,0.01,0.01, 0.03,0.04,0.05,0.06,0.07,0.08,0.08,0.07,0.06,0.05,0.04,0.03,0.03,0.02,0.02,0.01, 0.01,0.02,0.03,0.05,0.07,0.10,0.13,0.12,0.10,0.07,0.04,0.03,0.02,0.01,0.01,0.01],
+    "lbp_histogram": [0.013,0.007,0.005,0.010,0.005,0.004,0.003,0.007,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.006,0.005,0.004,0.003,0.005,0.004,0.003,0.003,0.005,0.004,0.003,0.003,0.004,0.003,0.003,0.007,0.011,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.005,0.009,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.004,0.006,0.004,0.003,0.004,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.004,0.006,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.004,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.004,0.003,0.004,0.006,0.005,0.004,0.005,0.008,0.006,0.008,0.012,0.020],
+    "aspect_ratio": {"min": 1.5, "max": 5.0}
+  },
+  "potato": {
+    "hsv_ranges": [
+      {"lower": [15, 30, 60], "upper": [30, 120, 200]},
+      {"lower": [10, 20, 80], "upper": [25, 100, 180]}
+    ],
+    "expected_saturation": {"min": 20, "max": 100, "weight": "high"},
+    "color_histogram": [0.01,0.01,0.02,0.04,0.05,0.05,0.04,0.03,0.02,0.01,0.01,0.01,0.01,0.03,0.05,0.04, 0.02,0.03,0.04,0.05,0.06,0.07,0.07,0.07,0.06,0.05,0.04,0.04,0.03,0.03,0.02,0.02, 0.01,0.02,0.03,0.05,0.07,0.09,0.11,0.11,0.09,0.07,0.05,0.03,0.02,0.02,0.01,0.01],
+    "lbp_histogram": [0.016,0.009,0.006,0.011,0.005,0.004,0.003,0.008,0.006,0.004,0.003,0.005,0.004,0.003,0.003,0.007,0.005,0.004,0.003,0.006,0.004,0.003,0.003,0.005,0.004,0.003,0.003,0.004,0.003,0.003,0.008,0.012,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.006,0.010,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.004,0.006,0.004,0.003,0.005,0.006,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.004,0.006,0.004,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.004,0.003,0.003,0.005,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.004,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.003,0.003,0.003,0.005,0.004,0.003,0.004,0.006,0.005,0.004,0.005,0.008,0.006,0.008,0.012,0.020],
+    "aspect_ratio": {"min": 0.7, "max": 1.5}
+  }
+}
+
+---------
+backend\data\nutrition_data.json
+Baza de date nutritionala - contine informatii per 100g pentru fiecare ingredient: calorii, proteine, carbohidrati, grasimi, fibre, portia standard si emoji.
+
+{
+  "ingredients": {
+    "banana": {
+      "calories": 89,
+      "protein": 1.1,
+      "carbs": 22.8,
+      "fat": 0.3,
+      "fiber": 2.6,
+      "serving_g": 120,
+      "emoji": "🍌"
+    },
+    "carrot": {
+      "calories": 41,
+      "protein": 0.9,
+      "carbs": 9.6,
+      "fat": 0.2,
+      "fiber": 2.8,
+      "serving_g": 80,
+      "emoji": "🥕"
+    },
+    "tomato": {
+      "calories": 18,
+      "protein": 0.9,
+      "carbs": 3.9,
+      "fat": 0.2,
+      "fiber": 1.2,
+      "serving_g": 120,
+      "emoji": "🍅"
+    },
+    "egg": {
+      "calories": 155,
+      "protein": 13.0,
+      "carbs": 1.1,
+      "fat": 11.0,
+      "fiber": 0.0,
+      "serving_g": 50,
+      "emoji": "🥚"
+    },
+    "onion": {
+      "calories": 40,
+      "protein": 1.1,
+      "carbs": 9.3,
+      "fat": 0.1,
+      "fiber": 1.7,
+      "serving_g": 100,
+      "emoji": "🧅"
+    },
+    "lemon": {
+      "calories": 29,
+      "protein": 1.1,
+      "carbs": 9.3,
+      "fat": 0.3,
+      "fiber": 2.8,
+      "serving_g": 60,
+      "emoji": "🍋"
+    },
+    "bell pepper": {
+      "calories": 31,
+      "protein": 1.0,
+      "carbs": 6.0,
+      "fat": 0.3,
+      "fiber": 2.1,
+      "serving_g": 120,
+      "emoji": "🫑"
+    },
+    "cucumber": {
+      "calories": 15,
+      "protein": 0.7,
+      "carbs": 3.6,
+      "fat": 0.1,
+      "fiber": 0.5,
+      "serving_g": 150,
+      "emoji": "🥒"
+    },
+    "potato": {
+      "calories": 77,
+      "protein": 2.0,
+      "carbs": 17.0,
+      "fat": 0.1,
+      "fiber": 2.2,
+      "serving_g": 150,
+      "emoji": "🥔"
+    }
+  }
+}
+
+---------
+backend\data\recipes.json
+Baza de date cu retete - 13 retete cu ingrediente primary/secondary, pasi de preparare, timp, dificultate, taguri, imagini si linkuri video YouTube.
+
+{
+  "recipes": [
+    {
+      "id": "greek-salad",
+      "title": "Greek Salad",
+      "category": "lunch",
+      "difficulty": "easy",
+      "time_minutes": 15,
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner",
+        "healthy"
+      ],
+      "image": "/assets/images/greek-salad.png",
+      "video_url": "https://www.youtube.com/watch?v=fLiFdOR_ifI",
+      "ingredients": [
+        {
+          "name": "tomato",
+          "amount": "3 medium",
+          "importance": "primary"
+        },
+        {
+          "name": "cucumber",
+          "amount": "1 large",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 small red",
+          "importance": "secondary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1 green",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1 (juice)",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Wash and chop the tomatoes into wedges.",
+        "Peel and slice the cucumber into half-moons.",
+        "Thinly slice the red onion into rings.",
+        "Core and slice the bell pepper into strips.",
+        "Combine all vegetables in a large bowl.",
+        "Squeeze fresh lemon juice over the salad.",
+        "Drizzle with olive oil, sprinkle salt and oregano.",
+        "Toss gently and serve immediately."
+      ]
+    },
+    {
+      "id": "banana-pancakes",
+      "title": "Banana Pancakes",
+      "category": "breakfast",
+      "difficulty": "easy",
+      "time_minutes": 20,
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner"
+      ],
+      "image": "/assets/images/banana-pancakes.png",
+      "video_url": "https://www.youtube.com/watch?v=NbGPOTDf6Jc",
+      "ingredients": [
+        {
+          "name": "banana",
+          "amount": "2 ripe",
+          "importance": "primary"
+        },
+        {
+          "name": "egg",
+          "amount": "2 large",
+          "importance": "primary"
+        }
+      ],
+      "steps": [
+        "Peel the bananas and mash them thoroughly in a bowl.",
+        "Crack the eggs into the mashed bananas and whisk until smooth.",
+        "Heat a non-stick pan over medium heat with a bit of butter.",
+        "Pour small circles of batter onto the pan.",
+        "Cook for 2-3 minutes until bubbles form on the surface.",
+        "Flip carefully and cook for another 1-2 minutes.",
+        "Serve with honey, maple syrup, or fresh fruit."
+      ]
+    },
+    {
+      "id": "classic-omelette",
+      "title": "Classic Veggie Omelette",
+      "category": "breakfast",
+      "difficulty": "easy",
+      "time_minutes": 10,
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner"
+      ],
+      "image": "/assets/images/omelette.png",
+      "video_url": "https://www.youtube.com/watch?v=RyH2ahBw7ck",
+      "ingredients": [
+        {
+          "name": "egg",
+          "amount": "3 large",
+          "importance": "primary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1/2 diced",
+          "importance": "secondary"
+        },
+        {
+          "name": "onion",
+          "amount": "1/4 diced",
+          "importance": "secondary"
+        },
+        {
+          "name": "tomato",
+          "amount": "1 small diced",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Crack eggs into a bowl and whisk with salt and pepper.",
+        "Dice the bell pepper, onion, and tomato into small pieces.",
+        "Heat butter in a non-stick pan over medium heat.",
+        "Pour in the egg mixture, tilting the pan to spread evenly.",
+        "Scatter the diced vegetables over one half of the omelette.",
+        "When the edges set, fold the omelette in half.",
+        "Cook for another 30 seconds and slide onto a plate."
+      ]
+    },
+    {
+      "id": "carrot-ginger-soup",
+      "title": "Carrot & Ginger Soup",
+      "category": "lunch",
+      "difficulty": "medium",
+      "time_minutes": 35,
+      "tags": [
+        "vegetarian",
+        "healthy"
+      ],
+      "image": "/assets/images/carrot-soup.png",
+      "video_url": "https://www.youtube.com/watch?v=TzVArIFQB64",
+      "ingredients": [
+        {
+          "name": "carrot",
+          "amount": "500g",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "potato",
+          "amount": "1 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1/2 (juice)",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Peel and roughly chop the carrots, onion, and potato.",
+        "Saut\u00e9 the onion in olive oil until translucent (5 minutes).",
+        "Add the carrots and potato, stir for 2 minutes.",
+        "Pour in 750ml vegetable stock and bring to a boil.",
+        "Reduce heat and simmer for 20 minutes until tender.",
+        "Blend until smooth using an immersion blender.",
+        "Add lemon juice, season with salt and pepper.",
+        "Serve hot with a swirl of cream and crusty bread."
+      ]
+    },
+    {
+      "id": "stuffed-peppers",
+      "title": "Stuffed Bell Peppers",
+      "category": "dinner",
+      "difficulty": "medium",
+      "time_minutes": 45,
+      "tags": [
+        "vegetarian"
+      ],
+      "image": "/assets/images/stuffed-peppers.png",
+      "video_url": "https://www.youtube.com/watch?v=YvGQn4RqpIY",
+      "ingredients": [
+        {
+          "name": "bell pepper",
+          "amount": "4 large",
+          "importance": "primary"
+        },
+        {
+          "name": "tomato",
+          "amount": "2 medium",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "carrot",
+          "amount": "1 medium",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Preheat oven to 190\u00b0C (375\u00b0F).",
+        "Cut the tops off the bell peppers, remove seeds.",
+        "Dice the onion, carrot, and tomatoes.",
+        "Cook rice according to package directions.",
+        "Saut\u00e9 onion and carrot until softened (5 minutes).",
+        "Mix saut\u00e9ed veggies with cooked rice and diced tomatoes.",
+        "Season with salt, pepper, and herbs.",
+        "Stuff each pepper, place in a baking dish.",
+        "Bake for 25 minutes until peppers are tender."
+      ]
+    },
+    {
+      "id": "potato-frittata",
+      "title": "Potato & Onion Frittata",
+      "category": "dinner",
+      "difficulty": "medium",
+      "time_minutes": 30,
+      "tags": [
+        "vegetarian"
+      ],
+      "image": "/assets/images/frittata.png",
+      "video_url": "https://www.youtube.com/watch?v=ic70lzv6y3c",
+      "ingredients": [
+        {
+          "name": "potato",
+          "amount": "2 medium",
+          "importance": "primary"
+        },
+        {
+          "name": "egg",
+          "amount": "6 large",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1/2 diced",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Peel and thinly slice the potatoes.",
+        "Slice the onion and dice the bell pepper.",
+        "Fry potato slices in olive oil until golden (10 minutes).",
+        "Add onion and bell pepper, cook for 5 more minutes.",
+        "Beat the eggs with salt and pepper.",
+        "Pour eggs over the vegetables in the pan.",
+        "Cook on low heat for 8 minutes until almost set.",
+        "Finish under the broiler for 2-3 minutes until golden on top.",
+        "Let rest 5 minutes, then slice into wedges."
+      ]
+    },
+    {
+      "id": "tomato-bruschetta",
+      "title": "Fresh Tomato Bruschetta",
+      "category": "lunch",
+      "difficulty": "easy",
+      "time_minutes": 15,
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner"
+      ],
+      "image": "/assets/images/bruschetta.png",
+      "video_url": "https://www.youtube.com/watch?v=Q3xg35pcLyo",
+      "ingredients": [
+        {
+          "name": "tomato",
+          "amount": "4 ripe",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1/4 small red",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1/2 (juice)",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Dice the tomatoes into small cubes.",
+        "Finely chop the red onion.",
+        "Combine tomatoes, onion, fresh basil in a bowl.",
+        "Add lemon juice, olive oil, salt and pepper.",
+        "Let marinate for 10 minutes.",
+        "Toast thick bread slices until golden.",
+        "Rub garlic clove on warm toast.",
+        "Spoon the tomato mixture on top and serve."
+      ]
+    },
+    {
+      "id": "cucumber-gazpacho",
+      "title": "Cool Cucumber Gazpacho",
+      "category": "lunch",
+      "difficulty": "easy",
+      "time_minutes": 15,
+      "tags": [
+        "vegetarian",
+        "quick",
+        "healthy"
+      ],
+      "image": "/assets/images/gazpacho.png",
+      "video_url": "https://www.youtube.com/watch?v=akhY_jn4RHc",
+      "ingredients": [
+        {
+          "name": "cucumber",
+          "amount": "2 large",
+          "importance": "primary"
+        },
+        {
+          "name": "tomato",
+          "amount": "2 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1 green",
+          "importance": "secondary"
+        },
+        {
+          "name": "onion",
+          "amount": "1/4 small",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1 (juice)",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Roughly chop cucumber, tomato, bell pepper, and onion.",
+        "Add all vegetables to a blender.",
+        "Add lemon juice, olive oil, and a splash of vinegar.",
+        "Blend until smooth (or leave slightly chunky).",
+        "Season with salt, pepper, and cumin.",
+        "Refrigerate for at least 30 minutes to chill.",
+        "Serve cold, garnished with diced cucumber and a drizzle of olive oil."
+      ]
+    },
+    {
+      "id": "egg-fried-rice",
+      "title": "Quick Egg Fried Rice",
+      "category": "dinner",
+      "difficulty": "easy",
+      "time_minutes": 15,
+      "tags": [
+        "quick",
+        "beginner"
+      ],
+      "image": "/assets/images/fried-rice.png",
+      "video_url": "https://www.youtube.com/watch?v=8kFT7b5qTK0",
+      "ingredients": [
+        {
+          "name": "egg",
+          "amount": "3 large",
+          "importance": "primary"
+        },
+        {
+          "name": "carrot",
+          "amount": "1 medium diced",
+          "importance": "secondary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 small diced",
+          "importance": "secondary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1/2 diced",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Cook rice and let it cool (day-old rice works best).",
+        "Dice carrot, onion, and bell pepper into small cubes.",
+        "Heat oil in a wok or large pan over high heat.",
+        "Scramble the eggs, then push them to the side.",
+        "Stir-fry the vegetables for 3 minutes.",
+        "Add the cold rice and toss everything together.",
+        "Season with soy sauce and sesame oil.",
+        "Stir-fry for 2 more minutes until rice is heated through."
+      ]
+    },
+    {
+      "id": "lemon-roasted-potatoes",
+      "title": "Lemon Roasted Potatoes",
+      "category": "dinner",
+      "difficulty": "easy",
+      "time_minutes": 45,
+      "tags": [
+        "vegetarian",
+        "beginner"
+      ],
+      "image": "/assets/images/roasted-potatoes.png",
+      "video_url": "https://www.youtube.com/watch?v=o1wZnJZm7dk",
+      "ingredients": [
+        {
+          "name": "potato",
+          "amount": "1kg",
+          "importance": "primary"
+        },
+        {
+          "name": "lemon",
+          "amount": "2 (juice + zest)",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 quartered",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Preheat oven to 200\u00b0C (400\u00b0F).",
+        "Peel and cut potatoes into wedges.",
+        "Quarter the onion.",
+        "Toss potatoes and onion with olive oil, lemon juice, and zest.",
+        "Season generously with salt, pepper, and oregano.",
+        "Spread in a single layer on a baking tray.",
+        "Roast for 35-40 minutes, turning halfway.",
+        "Serve hot, garnished with fresh herbs."
+      ]
+    },
+    {
+      "id": "fresh-salsa",
+      "title": "Fresh Tomato Salsa",
+      "category": "lunch",
+      "difficulty": "easy",
+      "time_minutes": 10,
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner",
+        "healthy"
+      ],
+      "image": "/assets/images/salsa.png",
+      "video_url": "https://www.youtube.com/watch?v=2hUXWDpe_eI",
+      "ingredients": [
+        {
+          "name": "tomato",
+          "amount": "4 ripe",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1/2 medium",
+          "importance": "primary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1 small",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1 (juice)",
+          "importance": "secondary"
+        },
+        {
+          "name": "cucumber",
+          "amount": "1/2 diced",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Finely dice the tomatoes, onion, bell pepper, and cucumber.",
+        "Combine all diced vegetables in a bowl.",
+        "Squeeze in fresh lemon juice.",
+        "Add a pinch of salt, pepper, and cumin.",
+        "Mix well and let rest for 5 minutes.",
+        "Taste and adjust seasoning.",
+        "Serve with tortilla chips or as a side."
+      ]
+    },
+    {
+      "id": "banana-smoothie-bowl",
+      "title": "Banana Smoothie Bowl",
+      "category": "breakfast",
+      "difficulty": "easy",
+      "time_minutes": 10,
+      "tags": [
+        "vegetarian",
+        "quick",
+        "healthy",
+        "beginner"
+      ],
+      "image": "/assets/images/smoothie-bowl.png",
+      "video_url": "https://www.youtube.com/watch?v=ZHLVI0TKwPQ",
+      "ingredients": [
+        {
+          "name": "banana",
+          "amount": "2 frozen",
+          "importance": "primary"
+        },
+        {
+          "name": "banana",
+          "amount": "1 extra for topping",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Slice bananas and freeze overnight.",
+        "Blend frozen bananas with a splash of milk until thick and creamy.",
+        "Pour into a bowl.",
+        "Thinly slice the extra banana for topping.",
+        "Add sliced banana, granola, and a drizzle of honey on top.",
+        "Sprinkle with chia seeds or shredded coconut.",
+        "Serve immediately before it melts."
+      ]
+    },
+    {
+      "id": "potato-leek-soup",
+      "title": "Creamy Potato Soup",
+      "category": "dinner",
+      "difficulty": "medium",
+      "time_minutes": 40,
+      "tags": [
+        "vegetarian",
+        "healthy"
+      ],
+      "image": "/assets/images/potato-soup.png",
+      "video_url": "https://www.youtube.com/watch?v=bjDcgKY3zv0",
+      "ingredients": [
+        {
+          "name": "potato",
+          "amount": "4 large",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 large",
+          "importance": "primary"
+        },
+        {
+          "name": "carrot",
+          "amount": "2 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1/2 (juice)",
+          "importance": "secondary"
+        }
+      ],
+      "steps": [
+        "Peel and dice the potatoes, onion, and carrots.",
+        "Saut\u00e9 the onion in butter until golden (5 minutes).",
+        "Add potatoes and carrots, cook for 3 minutes.",
+        "Pour in 1L vegetable stock and bring to a boil.",
+        "Simmer for 20 minutes until potatoes are fork-tender.",
+        "Blend half the soup for a chunky texture (or all for smooth).",
+        "Stir in cream, lemon juice, salt, and pepper.",
+        "Serve topped with chives and croutons."
+      ]
+    }
+  ]
+}
+
+---------
+backend\Dockerfile
+Dockerfile pentru backend - construieste imaginea Docker cu Python 3.11, instaleaza dependentele OpenCV si ruleaza serverul cu Uvicorn.
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libgl1-mesa-glx \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+---------
+frontend\index.html
+Pagina HTML principala - punctul de intrare al aplicatiei React SPA, include meta taguri SEO si link catre manifest.json pentru PWA.
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Smart Chef — AI-powered recipe recommendations using real-time computer vision ingredient detection. Point your camera, discover recipes." />
+    <meta name="theme-color" content="#0a0a0f" />
+    <link rel="manifest" href="/manifest.json" />
+    <title>Smart Chef — AI Recipe Recommendations</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+---------
+frontend\package.json
+Configurarea proiectului frontend - dependente React 19, dev dependencies Vite 8 si ESLint, si scripturi npm.
+
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.4.0",
+    "vite": "^8.0.1"
+  }
+}
+
+---------
+frontend\vite.config.js
+Configurarea Vite - plugin React si proxy pentru rutarea cererilor /api si /ws catre backend-ul FastAPI pe portul 8000.
+
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/ws': {
+        target: 'ws://localhost:8000',
+        ws: true,
+      },
+    },
+  },
+})
+
+---------
+frontend\eslint.config.js
+Configurarea ESLint - reguli pentru React hooks si React Refresh.
+
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import { defineConfig, globalIgnores } from 'eslint/config'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{js,jsx}'],
+    extends: [
+      js.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+      parserOptions: {
+        ecmaVersion: 'latest',
+        ecmaFeatures: { jsx: true },
+        sourceType: 'module',
+      },
+    },
+    rules: {
+      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+    },
+  },
+])
+
+---------
+frontend\src\main.jsx
+Punctul de intrare React - randeaza componenta App in DOM cu StrictMode.
+
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.jsx'
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+
+---------
+frontend\src\App.jsx
+Componenta principala App - orchestreaza camera, WebSocket-ul, starea ingredientelor acumulate persistent, cautarea retetelor si nutritiei via API, si afisarea interfetei complete.
+
+import { useState, useEffect, useCallback, useRef } from 'react';
+import Header from './components/Header';
+import ParticleBackground from './components/ParticleBackground';
+import WebcamDetector from './components/WebcamDetector';
+import IngredientChips from './components/IngredientChips';
+import RecipeCard from './components/RecipeCard';
+import RecipeModal from './components/RecipeModal';
+import { useWebSocket } from './hooks/useWebSocket';
+import { useWebcam } from './hooks/useWebcam';
+
+const WS_URL = `ws://${window.location.hostname}:8000/ws/detect`;
+const API_BASE = `http://${window.location.hostname}:8000`;
+const FRAME_INTERVAL = 600;
+
+export default function App() {
+  const { isConnected, lastMessage, connect, disconnect, sendFrame } = useWebSocket(WS_URL);
+  const { videoRef, isActive, startCamera, stopCamera, captureFrame } = useWebcam();
+
+  const [ingredients, setIngredients] = useState([]);
+  const [detections, setDetections] = useState([]);
+  const [recipes, setRecipes] = useState([]);
+  const [nutrition, setNutrition] = useState(null);
+  const [selectedRecipe, setSelectedRecipe] = useState(null);
+
+  const intervalRef = useRef(null);
+
+  useEffect(() => {
+    if (!lastMessage || lastMessage.error) return;
+
+    if (lastMessage.detections) {
+      setDetections(lastMessage.detections);
+    }
+
+    if (lastMessage.ingredients?.length > 0) {
+      setIngredients((prev) => {
+        const combined = new Set([...prev, ...lastMessage.ingredients]);
+        return [...combined].sort();
+      });
+    }
+  }, [lastMessage]);
+
+  useEffect(() => {
+    if (ingredients.length > 0) {
+      fetch(`${API_BASE}/api/recipes/match?ingredients=${ingredients.join(',')}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.matches) setRecipes(data.matches);
+        })
+        .catch(console.error);
+
+      fetch(`${API_BASE}/api/nutrition?ingredients=${ingredients.join(',')}`)
+        .then((r) => r.json())
+        .then((data) => setNutrition(data))
+        .catch(console.error);
+    } else {
+      setRecipes([]);
+      setNutrition(null);
+    }
+  }, [ingredients]);
+
+  useEffect(() => {
+    if (isActive && isConnected) {
+      intervalRef.current = setInterval(() => {
+        const frame = captureFrame();
+        if (frame) sendFrame(frame);
+      }, FRAME_INTERVAL);
+    }
+
+    return () => clearInterval(intervalRef.current);
+  }, [isActive, isConnected, captureFrame, sendFrame]);
+
+  const handleStartCamera = useCallback(async () => {
+    await startCamera();
+    connect();
+  }, [startCamera, connect]);
+
+  const handleStopCamera = useCallback(() => {
+    clearInterval(intervalRef.current);
+    stopCamera();
+    disconnect();
+    setDetections([]);
+  }, [stopCamera, disconnect]);
+
+  const handleAddIngredient = useCallback((name) => {
+    const trimmed = name.trim().toLowerCase();
+    if (trimmed) {
+      setIngredients((prev) => {
+        const combined = new Set([...prev, trimmed]);
+        return [...combined].sort();
+      });
+    }
+  }, []);
+
+  const handleRemoveIngredient = useCallback((name) => {
+    setIngredients((prev) => prev.filter((i) => i !== name));
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') setSelectedRecipe(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  return (
+    <>
+      <ParticleBackground />
+      <Header isConnected={isConnected} />
+
+      <main>
+        <WebcamDetector
+          videoRef={videoRef}
+          isActive={isActive}
+          detections={detections}
+          onStart={handleStartCamera}
+          onStop={handleStopCamera}
+        />
+
+        <IngredientChips
+          ingredients={ingredients}
+          onRemove={handleRemoveIngredient}
+          onAdd={handleAddIngredient}
+        />
+
+        <section className="recipes-section">
+          <div className="app-container">
+            <div className="section-title">
+              <span className="icon">🍽️</span>
+              <h2>Recommended Recipes</h2>
+            </div>
+
+            {recipes.length > 0 ? (
+              <div className="recipes-grid">
+                {recipes.map((recipe, i) => (
+                  <RecipeCard
+                    key={recipe.id}
+                    recipe={recipe}
+                    index={i}
+                    onClick={setSelectedRecipe}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <div className="icon">🔍</div>
+                <p>
+                  {ingredients.length > 0
+                    ? 'No matching recipes found. Try adding more ingredients!'
+                    : 'Start the camera to detect ingredients and discover recipes.'}
+                </p>
+              </div>
+            )}
+          </div>
+        </section>
+      </main>
+
+      <footer className="app-footer">
+        <p>Smart Chef — AI-Powered Recipe Recommendations • Built with React + FastAPI + YOLO</p>
+      </footer>
+
+      {selectedRecipe && (
+        <RecipeModal
+          recipe={selectedRecipe}
+          nutrition={nutrition}
+          onClose={() => setSelectedRecipe(null)}
+        />
+      )}
+    </>
+  );
+}
+
+---------
+frontend\src\index.css
+Sistemul de design CSS - tema dark premium cu glassmorphism, gradiente vibrante, variabile CSS custom, stiluri pentru toate componentele, animatii, scrollbar custom si design responsive.
+
+
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+
+:root {
+
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #12121a;
+  --bg-card: rgba(255, 255, 255, 0.04);
+  --bg-card-hover: rgba(255, 255, 255, 0.08);
+  --bg-glass: rgba(255, 255, 255, 0.06);
+  --bg-glass-border: rgba(255, 255, 255, 0.1);
+  --bg-modal: rgba(10, 10, 15, 0.92);
+
+
+  --gradient-primary: linear-gradient(135deg, #06b6d4, #8b5cf6);
+  --gradient-accent: linear-gradient(135deg, #22d3ee, #a78bfa);
+  --gradient-warm: linear-gradient(135deg, #f97316, #ec4899);
+  --gradient-success: linear-gradient(135deg, #10b981, #06b6d4);
+  --glow-cyan: 0 0 20px rgba(6, 182, 212, 0.3);
+  --glow-violet: 0 0 20px rgba(139, 92, 246, 0.3);
+
+
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-accent: #22d3ee;
+
+
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+
+
+  --transition-fast: 150ms ease;
+  --transition-base: 250ms ease;
+  --transition-slow: 400ms cubic-bezier(0.16, 1, 0.3, 1);
+
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+h1 { font-size: clamp(1.8rem, 4vw, 2.8rem); }
+h2 { font-size: clamp(1.4rem, 3vw, 2rem); }
+h3 { font-size: clamp(1.1rem, 2vw, 1.4rem); }
+
+.gradient-text {
+  background: var(--gradient-primary);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+
+.glass-card {
+  background: var(--bg-glass);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--bg-glass-border);
+  border-radius: var(--radius-lg);
+  transition: all var(--transition-base);
+}
+
+.glass-card:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow: var(--glow-cyan);
+  transform: translateY(-2px);
+}
+
+
+.app-container {
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 var(--space-lg);
+}
+
+.section {
+  padding: var(--space-3xl) 0;
+}
+
+.section-title {
+  margin-bottom: var(--space-xl);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.section-title .icon {
+  font-size: 1.5rem;
+}
+
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(10, 10, 15, 0.8);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--bg-glass-border);
+  padding: var(--space-md) 0;
+}
+
+.header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 var(--space-lg);
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: 1.4rem;
+  font-weight: 800;
+  text-decoration: none;
+  color: var(--text-primary);
+}
+
+.logo .emoji {
+  font-size: 1.6rem;
+}
+
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-full);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.status-badge.connected {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.status-badge.disconnected {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+
+.webcam-section {
+  padding: var(--space-2xl) 0;
+}
+
+.webcam-wrapper {
+  position: relative;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  border: 2px solid var(--bg-glass-border);
+  background: var(--bg-secondary);
+  aspect-ratio: 4 / 3;
+}
+
+.webcam-wrapper video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.webcam-wrapper canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.webcam-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-md);
+  color: var(--text-muted);
+}
+
+.webcam-placeholder .icon {
+  font-size: 3rem;
+  opacity: 0.5;
+}
+
+.cam-btn {
+  padding: var(--space-sm) var(--space-xl);
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--gradient-primary);
+  color: white;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-base);
+  position: relative;
+  overflow: hidden;
+}
+
+.cam-btn:hover {
+  transform: scale(1.05);
+  box-shadow: var(--glow-cyan);
+}
+
+.cam-btn:active {
+  transform: scale(0.98);
+}
+
+.cam-btn.stop {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+}
+
+
+.ingredients-section {
+  padding: var(--space-xl) 0;
+}
+
+.chips-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  min-height: 48px;
+  padding: var(--space-md);
+  border-radius: var(--radius-lg);
+  background: var(--bg-glass);
+  border: 1px dashed var(--bg-glass-border);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-full);
+  background: var(--bg-card);
+  border: 1px solid var(--bg-glass-border);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  animation: chipIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all var(--transition-fast);
+}
+
+.chip:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--text-accent);
+}
+
+.chip .emoji {
+  font-size: 1rem;
+}
+
+.chip .remove {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  margin-left: var(--space-xs);
+  line-height: 1;
+}
+
+.chip .remove:hover {
+  background: rgba(239, 68, 68, 0.3);
+  color: #ef4444;
+}
+
+.no-ingredients {
+  width: 100%;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: var(--space-sm);
+}
+
+
+.add-ingredient-row {
+  margin-bottom: var(--space-md);
+}
+
+.add-ingredient-form {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.autocomplete-wrapper {
+  position: relative;
+  flex: 1;
+}
+
+.ingredient-input {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--bg-glass-border);
+  background: var(--bg-glass);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  outline: none;
+  transition: all var(--transition-base);
+}
+
+.ingredient-input::placeholder {
+  color: var(--text-muted);
+}
+
+.ingredient-input:focus {
+  border-color: rgba(6, 182, 212, 0.5);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.1), var(--glow-cyan);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ingredient-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.autocomplete-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  list-style: none;
+  background: rgba(18, 18, 26, 0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--bg-glass-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-xs);
+  max-height: 260px;
+  overflow-y: auto;
+  z-index: 50;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: dropdownIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dropdownIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.autocomplete-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.autocomplete-item:hover,
+.autocomplete-item.active {
+  background: rgba(6, 182, 212, 0.12);
+  color: var(--text-primary);
+}
+
+.autocomplete-item.active {
+  border-left: 3px solid #22d3ee;
+  padding-left: calc(var(--space-md) - 3px);
+}
+
+.autocomplete-item.no-match {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.autocomplete-item.no-match:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.autocomplete-emoji {
+  font-size: 1.2rem;
+  min-width: 24px;
+  text-align: center;
+}
+
+.autocomplete-name {
+  text-transform: capitalize;
+  font-weight: 500;
+}
+
+
+.recipes-section {
+  padding: var(--space-xl) 0 var(--space-3xl);
+}
+
+.recipes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-lg);
+}
+
+.recipe-card {
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  cursor: pointer;
+  transition: all var(--transition-slow);
+  background: var(--bg-glass);
+  border: 1px solid var(--bg-glass-border);
+  backdrop-filter: blur(10px);
+  animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.recipe-card:hover {
+  transform: translateY(-6px) scale(1.02);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), var(--glow-violet);
+  border-color: rgba(139, 92, 246, 0.3);
+}
+
+.recipe-card-image {
+  position: relative;
+  width: 100%;
+  height: 180px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.recipe-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform var(--transition-slow);
+}
+
+.recipe-card:hover .recipe-card-image img {
+  transform: scale(1.08);
+}
+
+.match-badge {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-full);
+  background: var(--gradient-primary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: white;
+}
+
+.recipe-card-body {
+  padding: var(--space-md);
+}
+
+.recipe-card-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-bottom: var(--space-sm);
+  color: var(--text-primary);
+}
+
+.recipe-card-meta {
+  display: flex;
+  gap: var(--space-md);
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-sm);
+}
+
+.recipe-card-meta span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.match-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  margin-top: var(--space-sm);
+}
+
+.match-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--gradient-primary);
+  transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: var(--space-sm);
+}
+
+.tag {
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: rgba(139, 92, 246, 0.12);
+  color: #a78bfa;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--bg-modal);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-lg);
+  animation: fadeIn 0.3s ease;
+}
+
+.modal-content {
+  width: 100%;
+  max-width: 700px;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--bg-glass-border);
+  border-radius: var(--radius-xl);
+  animation: modalIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.modal-header {
+  position: relative;
+  height: 220px;
+  overflow: hidden;
+}
+
+.modal-header img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.modal-header-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(transparent 40%, var(--bg-secondary) 100%);
+}
+
+.modal-close {
+  position: absolute;
+  top: var(--space-md);
+  right: var(--space-md);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  color: white;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+  z-index: 10;
+}
+
+.modal-close:hover {
+  background: rgba(239, 68, 68, 0.6);
+  transform: scale(1.1);
+}
+
+.modal-body {
+  padding: var(--space-lg);
+}
+
+.modal-title {
+  font-size: 1.6rem;
+  font-weight: 800;
+  margin-bottom: var(--space-xs);
+}
+
+.modal-meta {
+  display: flex;
+  gap: var(--space-lg);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-bottom: var(--space-lg);
+}
+
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-md);
+  padding: 3px;
+  margin-bottom: var(--space-lg);
+}
+
+.tab {
+  flex: 1;
+  padding: var(--space-sm) var(--space-md);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.tab:hover {
+  color: var(--text-primary);
+}
+
+.tab.active {
+  background: var(--gradient-primary);
+  color: white;
+}
+
+
+.steps-list {
+  list-style: none;
+  counter-reset: step;
+}
+
+.steps-list li {
+  counter-increment: step;
+  padding: var(--space-md);
+  padding-left: var(--space-2xl);
+  position: relative;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.6;
+  border-left: 2px solid rgba(255, 255, 255, 0.06);
+  margin-left: var(--space-md);
+}
+
+.steps-list li::before {
+  content: counter(step);
+  position: absolute;
+  left: -14px;
+  top: var(--space-md);
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--gradient-primary);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.steps-list li:last-child {
+  border-left-color: transparent;
+}
+
+
+.nutrition-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+}
+
+.nutrition-item {
+  padding: var(--space-md);
+  background: var(--bg-glass);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--bg-glass-border);
+}
+
+.nutrition-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-xs);
+}
+
+.nutrition-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin-bottom: var(--space-sm);
+}
+
+.nutrition-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.nutrition-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 1s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.nutrition-bar-fill.calories { background: var(--gradient-warm); }
+.nutrition-bar-fill.protein { background: var(--gradient-success); }
+.nutrition-bar-fill.carbs { background: var(--gradient-primary); }
+.nutrition-bar-fill.fat { background: linear-gradient(135deg, #f59e0b, #f97316); }
+
+
+.modal-ingredients {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-lg);
+}
+
+.modal-ingredient {
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.modal-ingredient.matched {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.modal-ingredient.missing {
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+
+.app-footer {
+  text-align: center;
+  padding: var(--space-xl) 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  border-top: 1px solid var(--bg-glass-border);
+  margin-top: auto;
+}
+
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes chipIn {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+
+.particle-canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+
+main {
+  position: relative;
+  z-index: 1;
+}
+
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+
+@media (max-width: 768px) {
+  .app-container {
+    padding: 0 var(--space-md);
+  }
+
+  .recipes-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .nutrition-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-content {
+    max-height: 95vh;
+    border-radius: var(--radius-lg);
+  }
+
+  .webcam-wrapper {
+    border-radius: var(--radius-lg);
+  }
+}
+
+@media (max-width: 480px) {
+  .header-inner {
+    flex-direction: column;
+    gap: var(--space-sm);
+  }
+
+  .modal-meta {
+    flex-direction: column;
+    gap: var(--space-sm);
+  }
+}
+
+
+.empty-state {
+  text-align: center;
+  padding: var(--space-3xl);
+  color: var(--text-muted);
+}
+
+.empty-state .icon {
+  font-size: 3rem;
+  margin-bottom: var(--space-md);
+  opacity: 0.4;
+}
+
+.empty-state p {
+  font-size: 0.9rem;
+  max-width: 360px;
+  margin: 0 auto;
+}
+
+---------
+frontend\src\components\Header.jsx
+Componenta Header - afiseaza logo-ul Smart Chef si badge-ul de status Live/Offline al conexiunii WebSocket.
+
+export default function Header({ isConnected }) {
+  return (
+    <header className="app-header">
+      <div className="header-inner">
+        <a href="/" className="logo">
+          <span className="emoji">🍳</span>
+          <span className="gradient-text">Smart Chef</span>
+        </a>
+        <div className={`status-badge ${isConnected ? 'connected' : 'disconnected'}`}>
+          <span className="status-dot"></span>
+          {isConnected ? 'Live' : 'Offline'}
+        </div>
+      </div>
+    </header>
+  );
+}
+
+---------
+frontend\src\components\IngredientChips.jsx
+Componenta IngredientChips - afiseaza ingredientele detectate ca chip-uri cu emoji si buton de stergere. Include un input cu autocomplete dropdown pentru adaugarea manuala a ingredientelor din lista predefinita.
+
+import { useState, useRef, useEffect } from 'react';
+
+const EMOJI_MAP = {
+  banana: '🍌',
+  carrot: '🥕',
+  tomato: '🍅',
+  egg: '🥚',
+  onion: '🧅',
+  lemon: '🍋',
+  'bell pepper': '🫑',
+  cucumber: '🥒',
+  potato: '🥔',
+};
+
+const KNOWN_INGREDIENTS = Object.keys(EMOJI_MAP);
+
+export default function IngredientChips({ ingredients, onRemove, onAdd }) {
+  const [inputValue, setInputValue] = useState('');
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const wrapperRef = useRef(null);
+
+  const available = KNOWN_INGREDIENTS.filter((ing) => !ingredients.includes(ing));
+
+  const filtered = inputValue.trim()
+    ? available.filter((ing) =>
+        ing.toLowerCase().includes(inputValue.trim().toLowerCase())
+      )
+    : available;
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target)) {
+        setShowDropdown(false);
+        setActiveIndex(-1);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const selectIngredient = (name) => {
+    if (onAdd) onAdd(name);
+    setInputValue('');
+    setShowDropdown(false);
+    setActiveIndex(-1);
+  };
+
+  const handleInputChange = (e) => {
+    setInputValue(e.target.value);
+    setShowDropdown(true);
+    setActiveIndex(-1);
+  };
+
+  const handleFocus = () => {
+    setShowDropdown(true);
+    setActiveIndex(-1);
+  };
+
+  const handleKeyDown = (e) => {
+    if (!showDropdown || filtered.length === 0) {
+      if (e.key === 'Escape') {
+        setShowDropdown(false);
+        setActiveIndex(-1);
+      }
+      return;
+    }
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveIndex((prev) => (prev < filtered.length - 1 ? prev + 1 : 0));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveIndex((prev) => (prev > 0 ? prev - 1 : filtered.length - 1));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (activeIndex >= 0 && activeIndex < filtered.length) {
+        selectIngredient(filtered[activeIndex]);
+      } else if (filtered.length === 1) {
+        selectIngredient(filtered[0]);
+      }
+    } else if (e.key === 'Escape') {
+      setShowDropdown(false);
+      setActiveIndex(-1);
+    }
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (activeIndex >= 0 && filtered.length > 0) {
+      selectIngredient(filtered[activeIndex]);
+    } else if (filtered.length === 1) {
+      selectIngredient(filtered[0]);
+    }
+  };
+
+  const allAdded = available.length === 0;
+
+  return (
+    <section className="ingredients-section">
+      <div className="app-container">
+        <div className="section-title">
+          <span className="icon">🧾</span>
+          <h2>Detected Ingredients</h2>
+          {ingredients.length > 0 && (
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginLeft: '8px' }}>
+              ({ingredients.length})
+            </span>
+          )}
+        </div>
+
+        <div className="add-ingredient-row" ref={wrapperRef}>
+          <form onSubmit={handleSubmit} className="add-ingredient-form">
+            <div className="autocomplete-wrapper">
+              <input
+                type="text"
+                value={inputValue}
+                onChange={handleInputChange}
+                onFocus={handleFocus}
+                onKeyDown={handleKeyDown}
+                placeholder={allAdded ? 'All ingredients added ✓' : 'Click to select an ingredient…'}
+                className="ingredient-input"
+                autoComplete="off"
+                disabled={allAdded}
+              />
+
+              {showDropdown && filtered.length > 0 && (
+                <ul className="autocomplete-dropdown">
+                  {filtered.map((name, i) => (
+                    <li
+                      key={name}
+                      className={`autocomplete-item${i === activeIndex ? ' active' : ''}`}
+                      onMouseDown={() => selectIngredient(name)}
+                      onMouseEnter={() => setActiveIndex(i)}
+                    >
+                      <span className="autocomplete-emoji">{EMOJI_MAP[name] || '🍽️'}</span>
+                      <span className="autocomplete-name">{name}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {showDropdown && filtered.length === 0 && inputValue.trim() && (
+                <ul className="autocomplete-dropdown">
+                  <li className="autocomplete-item no-match">
+                    <span className="autocomplete-emoji">🚫</span>
+                    <span className="autocomplete-name">No matching ingredient found</span>
+                  </li>
+                </ul>
+              )}
+            </div>
+          </form>
+        </div>
+
+        <div className="chips-container">
+          {ingredients.length === 0 ? (
+            <div className="no-ingredients">
+              No ingredients detected yet — start the camera and show some food!
+            </div>
+          ) : (
+            ingredients.map((name) => (
+              <span key={name} className="chip">
+                <span className="emoji">{EMOJI_MAP[name] || '🍽️'}</span>
+                {name}
+                <button
+                  className="remove"
+                  onClick={() => onRemove(name)}
+                  aria-label={`Remove ${name}`}
+                >
+                  ✕
+                </button>
+              </span>
+            ))
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+---------
+frontend\src\components\ParticleBackground.jsx
+Componenta ParticleBackground - animeaza un fundal cu particule flotante cyan si violet conectate prin linii, folosind Canvas 2D.
+
+import { useEffect, useRef } from 'react';
+
+export default function ParticleBackground() {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let animId;
+    let particles = [];
+
+    const resize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    };
+    resize();
+    window.addEventListener('resize', resize);
+
+    const PARTICLE_COUNT = 40;
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      particles.push({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        vx: (Math.random() - 0.5) * 0.3,
+        vy: (Math.random() - 0.5) * 0.3,
+        radius: Math.random() * 2 + 0.5,
+        opacity: Math.random() * 0.3 + 0.05,
+        hue: Math.random() > 0.5 ? 186 : 270,
+      });
+    }
+
+    const draw = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      particles.forEach((p) => {
+        p.x += p.vx;
+        p.y += p.vy;
+
+        if (p.x < 0) p.x = canvas.width;
+        if (p.x > canvas.width) p.x = 0;
+        if (p.y < 0) p.y = canvas.height;
+        if (p.y > canvas.height) p.y = 0;
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fillStyle = `hsla(${p.hue}, 80%, 65%, ${p.opacity})`;
+        ctx.fill();
+      });
+
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const dx = particles[i].x - particles[j].x;
+          const dy = particles[i].y - particles[j].y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+
+          if (dist < 150) {
+            ctx.beginPath();
+            ctx.moveTo(particles[i].x, particles[i].y);
+            ctx.lineTo(particles[j].x, particles[j].y);
+            ctx.strokeStyle = `rgba(100, 200, 255, ${0.06 * (1 - dist / 150)})`;
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+          }
+        }
+      }
+
+      animId = requestAnimationFrame(draw);
+    };
+
+    draw();
+
+    return () => {
+      cancelAnimationFrame(animId);
+      window.removeEventListener('resize', resize);
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="particle-canvas" />;
+}
+
+---------
+frontend\src\components\RecipeCard.jsx
+Componenta RecipeCard - card de reteta cu imagine, badge procent potrivire, metadate timp si dificultate, bara de progres si taguri.
+
+export default function RecipeCard({ recipe, onClick, index }) {
+  return (
+    <article
+      className="recipe-card glass-card"
+      onClick={() => onClick(recipe)}
+      style={{ animationDelay: `${index * 0.08}s` }}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => e.key === 'Enter' && onClick(recipe)}
+      aria-label={`View recipe: ${recipe.title}`}
+    >
+      <div className="recipe-card-image">
+        <img
+          src={recipe.image?.replace(/^\//, '') || 'placeholder-food.svg'}
+          alt={recipe.title}
+          loading="lazy"
+          onError={(e) => {
+            e.target.onerror = null;
+            e.target.src = `https://placehold.co/400x250/1a1a2e/22d3ee?text=${encodeURIComponent(recipe.title)}`;
+          }}
+        />
+        <span className="match-badge">{recipe.match_percent}% match</span>
+      </div>
+
+      <div className="recipe-card-body">
+        <h3 className="recipe-card-title">{recipe.title}</h3>
+
+        <div className="recipe-card-meta">
+          <span>⏱ {recipe.time_minutes} min</span>
+          <span>📊 {recipe.difficulty}</span>
+          <span>🥗 {recipe.ingredients?.length || 0} items</span>
+        </div>
+
+        <div className="match-bar">
+          <div
+            className="match-bar-fill"
+            style={{ width: `${recipe.match_percent}%` }}
+          />
+        </div>
+
+        <div className="tags-row">
+          {recipe.tags?.slice(0, 3).map((tag) => (
+            <span key={tag} className="tag">{tag}</span>
+          ))}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+---------
+frontend\src\components\RecipeModal.jsx
+Componenta RecipeModal - modal detaliat pentru reteta selectata cu imagine, ingrediente matched/missing, taburi Pasi de preparare si Nutritie cu bare vizuale, link video YouTube si buton de inchidere.
+
+import { useState } from 'react';
+
+export default function RecipeModal({ recipe, nutrition, onClose }) {
+  const [activeTab, setActiveTab] = useState('steps');
+
+  if (!recipe) return null;
+
+  const handleOverlayClick = (e) => {
+    if (e.target === e.currentTarget) onClose();
+  };
+
+  const maxCal = nutrition?.total?.calories || 500;
+  const bars = nutrition
+    ? [
+        { key: 'calories', label: 'Calories', value: nutrition.total.calories, unit: 'kcal', max: maxCal },
+        { key: 'protein', label: 'Protein', value: nutrition.total.protein, unit: 'g', max: 60 },
+        { key: 'carbs', label: 'Carbs', value: nutrition.total.carbs, unit: 'g', max: 100 },
+        { key: 'fat', label: 'Fat', value: nutrition.total.fat, unit: 'g', max: 50 },
+      ]
+    : [];
+
+  return (
+    <div className="modal-overlay" onClick={handleOverlayClick}>
+      <div className="modal-content" role="dialog" aria-label={recipe.title}>
+        {}
+        <div className="modal-header">
+          <img
+            src={recipe.image?.replace(/^\//, '') || 'placeholder-food.svg'}
+            alt={recipe.title}
+            onError={(e) => {
+              e.target.onerror = null;
+              e.target.src = `https://placehold.co/700x220/1a1a2e/22d3ee?text=${encodeURIComponent(recipe.title)}`;
+            }}
+          />
+          <div className="modal-header-overlay" />
+          <button className="modal-close" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+
+        <div className="modal-body">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-xs)' }}>
+            <h2 className="modal-title" style={{ marginBottom: 0 }}>{recipe.title}</h2>
+            {recipe.video_url && (
+              <a 
+                href={recipe.video_url} 
+                target="_blank" 
+                rel="noreferrer" 
+                className="cam-btn" 
+                style={{ padding: '0.4rem 1rem', fontSize: '0.8rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+              >
+                <span>▶️</span> Watch Video
+              </a>
+            )}
+          </div>
+
+          <div className="modal-meta">
+            <span>⏱ {recipe.time_minutes} min</span>
+            <span>📊 {recipe.difficulty}</span>
+            <span>🎯 {recipe.match_percent}% match</span>
+          </div>
+
+          {}
+          <div className="modal-ingredients">
+            {recipe.matched_ingredients?.map((i) => (
+              <span key={i} className="modal-ingredient matched">✓ {i}</span>
+            ))}
+            {recipe.missing_ingredients?.map((i) => (
+              <span key={i} className="modal-ingredient missing">✗ {i}</span>
+            ))}
+          </div>
+
+          {}
+          <div className="tabs">
+            <button
+              className={`tab ${activeTab === 'steps' ? 'active' : ''}`}
+              onClick={() => setActiveTab('steps')}
+            >
+              📋 Steps
+            </button>
+            <button
+              className={`tab ${activeTab === 'nutrition' ? 'active' : ''}`}
+              onClick={() => setActiveTab('nutrition')}
+            >
+              📊 Nutrition
+            </button>
+          </div>
+
+          {}
+          {activeTab === 'steps' && (
+            <ol className="steps-list">
+              {recipe.steps?.map((step, i) => (
+                <li key={i}>{step}</li>
+              ))}
+            </ol>
+          )}
+
+          {activeTab === 'nutrition' && nutrition && (
+            <div className="nutrition-grid">
+              {bars.map((b) => (
+                <div key={b.key} className="nutrition-item">
+                  <div className="nutrition-label">{b.label}</div>
+                  <div className="nutrition-value">
+                    {b.value} <small style={{ fontSize: '0.6em', color: 'var(--text-muted)' }}>{b.unit}</small>
+                  </div>
+                  <div className="nutrition-bar">
+                    <div
+                      className={`nutrition-bar-fill ${b.key}`}
+                      style={{ width: `${Math.min((b.value / b.max) * 100, 100)}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {activeTab === 'nutrition' && !nutrition && (
+            <div className="empty-state">
+              <p>Nutrition data not available for this combination.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+---------
+frontend\src\components\WebcamDetector.jsx
+Componenta WebcamDetector - afiseaza feed-ul video de la camera si deseneaza bounding boxes cu etichete pe un canvas overlay pentru ingredientele detectate in timp real.
+
+import { useRef, useEffect, useCallback } from 'react';
+
+export default function WebcamDetector({
+  videoRef,
+  isActive,
+  detections,
+  onStart,
+  onStop,
+}) {
+  const canvasRef = useRef(null);
+
+  const drawDetections = useCallback(() => {
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!canvas || !video) return;
+
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!detections || detections.length === 0) return;
+
+    detections.forEach((det) => {
+      const [x1, y1, x2, y2] = det.bbox;
+      const w = x2 - x1;
+      const h = y2 - y1;
+
+      ctx.strokeStyle = '#22d3ee';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = 'rgba(34, 211, 238, 0.5)';
+      ctx.shadowBlur = 8;
+      ctx.strokeRect(x1, y1, w, h);
+      ctx.shadowBlur = 0;
+
+      const label = `${det.ingredient || det.yolo_class} ${Math.round(det.confidence * 100)}%`;
+      ctx.font = '600 13px Inter, sans-serif';
+      const textW = ctx.measureText(label).width;
+      const labelH = 22;
+      const labelY = y1 > labelH + 4 ? y1 - labelH - 4 : y1;
+
+      ctx.fillStyle = 'rgba(6, 182, 212, 0.85)';
+      ctx.beginPath();
+      ctx.roundRect(x1, labelY, textW + 12, labelH, 4);
+      ctx.fill();
+
+      ctx.fillStyle = '#fff';
+      ctx.fillText(label, x1 + 6, labelY + 15);
+    });
+  }, [detections, videoRef]);
+
+  useEffect(() => {
+    drawDetections();
+  }, [drawDetections]);
+
+  return (
+    <section className="webcam-section">
+      <div className="app-container">
+        <div className="section-title">
+          <span className="icon">📸</span>
+          <h2>Live Detection</h2>
+        </div>
+
+        <div className="webcam-wrapper">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            style={{ display: isActive ? 'block' : 'none' }}
+          />
+          <canvas ref={canvasRef} />
+
+          {!isActive && (
+            <div className="webcam-placeholder">
+              <span className="icon">📷</span>
+              <p>Point your camera at ingredients</p>
+              <button className="cam-btn" onClick={onStart}>
+                Start Camera
+              </button>
+            </div>
+          )}
+        </div>
+
+        {isActive && (
+          <div style={{ textAlign: 'center', marginTop: '16px' }}>
+            <button className="cam-btn stop" onClick={onStop}>
+              Stop Camera
+            </button>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+---------
+frontend\src\hooks\useWebcam.js
+Hook custom useWebcam - gestioneaza accesul la camera start/stop, captura cadrelor video ca base64 JPEG si curatarea stream-ului la unmount.
+
+import { useState, useRef, useCallback, useEffect } from 'react';
+
+export function useWebcam() {
+  const [isActive, setIsActive] = useState(false);
+  const [error, setError] = useState(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+
+  const startCamera = useCallback(async () => {
+    try {
+      setError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        },
+        audio: false,
+      });
+
+      streamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      setIsActive(true);
+    } catch (err) {
+      console.error('[Camera]', err);
+      setError(err.message || 'Camera access denied');
+      setIsActive(false);
+    }
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setIsActive(false);
+  }, []);
+
+  const captureFrame = useCallback(() => {
+    if (!videoRef.current || !isActive) return null;
+
+    const video = videoRef.current;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+    return dataUrl.split(',')[1];
+  }, [isActive]);
+
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, []);
+
+  return { videoRef, isActive, error, startCamera, stopCamera, captureFrame };
+}
+
+---------
+frontend\src\hooks\useWebSocket.js
+Hook custom useWebSocket - gestioneaza conexiunea WebSocket cu auto-reconectare, parsarea mesajelor JSON si trimiterea cadrelor base64 catre backend.
+
+import { useState, useEffect, useRef, useCallback } from 'react';
+
+const RECONNECT_DELAY = 3000;
+
+export function useWebSocket(url) {
+  const [isConnected, setIsConnected] = useState(false);
+  const [lastMessage, setLastMessage] = useState(null);
+  const wsRef = useRef(null);
+  const reconnectTimer = useRef(null);
+
+  const connect = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    try {
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setIsConnected(true);
+        console.log('[WS] Connected');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          setLastMessage(data);
+        } catch (e) {
+          console.error('[WS] Parse error:', e);
+        }
+      };
+
+      ws.onclose = () => {
+        setIsConnected(false);
+        console.log('[WS] Disconnected, reconnecting...');
+        reconnectTimer.current = setTimeout(connect, RECONNECT_DELAY);
+      };
+
+      ws.onerror = (error) => {
+        console.error('[WS] Error:', error);
+        ws.close();
+      };
+    } catch (e) {
+      console.error('[WS] Connection failed:', e);
+      reconnectTimer.current = setTimeout(connect, RECONNECT_DELAY);
+    }
+  }, [url]);
+
+  const disconnect = useCallback(() => {
+    clearTimeout(reconnectTimer.current);
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setIsConnected(false);
+  }, []);
+
+  const sendFrame = useCallback((base64Data) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(base64Data);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearTimeout(reconnectTimer.current);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
+    };
+  }, []);
+
+  return { isConnected, lastMessage, connect, disconnect, sendFrame };
+}
+
+---------
+frontend\Dockerfile
+Dockerfile multi-stage pentru frontend - Stage 1: build React cu Node 20, Stage 2: servire statica cu Nginx Alpine.
+
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+
+---------
+frontend\nginx.conf
+Configurarea Nginx - compresie gzip, cache pentru assets statice, proxy pentru /api si /ws catre backend, si fallback SPA pentru rutare client-side.
+
+server {
+    listen 80;
+    server_name localhost;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?)$ {
+        expires 7d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location /api/ {
+        proxy_pass http://smartchef-backend:8000/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /ws/ {
+        proxy_pass http://smartchef-backend:8000/ws/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+---------
+frontend\public\manifest.json
+Manifestul PWA - defineste numele aplicatiei, culori tema, iconita si modul de afisare standalone.
+
+{
+  "name": "Smart Chef",
+  "short_name": "SmartChef",
+  "description": "AI-powered recipe recommendations via real-time ingredient detection",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#0a0a0f",
+  "background_color": "#0a0a0f",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
+
+---------
+docker-compose.yml
+Docker Compose - orchestreaza serviciile smartchef-backend pe portul 8000 si smartchef-frontend pe portul 80 cu health check si restart automat.
+
+services:
+  smartchef-backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  smartchef-frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - smartchef-backend
+    restart: unless-stopped
+

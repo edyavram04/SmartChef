@@ -6,15 +6,40 @@
       "category": "lunch",
       "difficulty": "easy",
       "time_minutes": 15,
-      "tags": ["vegetarian", "quick", "beginner", "healthy"],
-      "image": "/assets/images/greek-salad.jpg",
-      "video_url": "https://www.pexels.com/video/a-person-making-a-vegetable-salad-3195394/",
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner",
+        "healthy"
+      ],
+      "image": "/assets/images/greek-salad.png",
+      "video_url": "https://www.youtube.com/watch?v=fLiFdOR_ifI",
       "ingredients": [
-        {"name": "tomato", "amount": "3 medium", "importance": "primary"},
-        {"name": "cucumber", "amount": "1 large", "importance": "primary"},
-        {"name": "onion", "amount": "1 small red", "importance": "secondary"},
-        {"name": "bell pepper", "amount": "1 green", "importance": "secondary"},
-        {"name": "lemon", "amount": "1 (juice)", "importance": "secondary"}
+        {
+          "name": "tomato",
+          "amount": "3 medium",
+          "importance": "primary"
+        },
+        {
+          "name": "cucumber",
+          "amount": "1 large",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 small red",
+          "importance": "secondary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1 green",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1 (juice)",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Wash and chop the tomatoes into wedges.",
@@ -33,12 +58,24 @@
       "category": "breakfast",
       "difficulty": "easy",
       "time_minutes": 20,
-      "tags": ["vegetarian", "quick", "beginner"],
-      "image": "/assets/images/banana-pancakes.jpg",
-      "video_url": "https://www.pexels.com/video/making-a-pancake-5765279/",
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner"
+      ],
+      "image": "/assets/images/banana-pancakes.png",
+      "video_url": "https://www.youtube.com/watch?v=NbGPOTDf6Jc",
       "ingredients": [
-        {"name": "banana", "amount": "2 ripe", "importance": "primary"},
-        {"name": "egg", "amount": "2 large", "importance": "primary"}
+        {
+          "name": "banana",
+          "amount": "2 ripe",
+          "importance": "primary"
+        },
+        {
+          "name": "egg",
+          "amount": "2 large",
+          "importance": "primary"
+        }
       ],
       "steps": [
         "Peel the bananas and mash them thoroughly in a bowl.",
@@ -56,14 +93,34 @@
       "category": "breakfast",
       "difficulty": "easy",
       "time_minutes": 10,
-      "tags": ["vegetarian", "quick", "beginner"],
-      "image": "/assets/images/omelette.jpg",
-      "video_url": "https://www.pexels.com/video/cooking-omelette-6507478/",
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner"
+      ],
+      "image": "/assets/images/omelette.png",
+      "video_url": "https://www.youtube.com/watch?v=RyH2ahBw7ck",
       "ingredients": [
-        {"name": "egg", "amount": "3 large", "importance": "primary"},
-        {"name": "bell pepper", "amount": "1/2 diced", "importance": "secondary"},
-        {"name": "onion", "amount": "1/4 diced", "importance": "secondary"},
-        {"name": "tomato", "amount": "1 small diced", "importance": "secondary"}
+        {
+          "name": "egg",
+          "amount": "3 large",
+          "importance": "primary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1/2 diced",
+          "importance": "secondary"
+        },
+        {
+          "name": "onion",
+          "amount": "1/4 diced",
+          "importance": "secondary"
+        },
+        {
+          "name": "tomato",
+          "amount": "1 small diced",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Crack eggs into a bowl and whisk with salt and pepper.",
@@ -81,18 +138,37 @@
       "category": "lunch",
       "difficulty": "medium",
       "time_minutes": 35,
-      "tags": ["vegetarian", "healthy"],
-      "image": "/assets/images/carrot-soup.jpg",
-      "video_url": "https://www.pexels.com/video/cooking-soup-4058073/",
+      "tags": [
+        "vegetarian",
+        "healthy"
+      ],
+      "image": "/assets/images/carrot-soup.png",
+      "video_url": "https://www.youtube.com/watch?v=TzVArIFQB64",
       "ingredients": [
-        {"name": "carrot", "amount": "500g", "importance": "primary"},
-        {"name": "onion", "amount": "1 medium", "importance": "secondary"},
-        {"name": "potato", "amount": "1 medium", "importance": "secondary"},
-        {"name": "lemon", "amount": "1/2 (juice)", "importance": "secondary"}
+        {
+          "name": "carrot",
+          "amount": "500g",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "potato",
+          "amount": "1 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1/2 (juice)",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Peel and roughly chop the carrots, onion, and potato.",
-        "Sauté the onion in olive oil until translucent (5 minutes).",
+        "Saut\u00e9 the onion in olive oil until translucent (5 minutes).",
         "Add the carrots and potato, stir for 2 minutes.",
         "Pour in 750ml vegetable stock and bring to a boil.",
         "Reduce heat and simmer for 20 minutes until tender.",
@@ -107,22 +183,40 @@
       "category": "dinner",
       "difficulty": "medium",
       "time_minutes": 45,
-      "tags": ["vegetarian"],
-      "image": "/assets/images/stuffed-peppers.jpg",
-      "video_url": "https://www.pexels.com/video/vegetable-food-3326364/",
+      "tags": [
+        "vegetarian"
+      ],
+      "image": "/assets/images/stuffed-peppers.png",
+      "video_url": "https://www.youtube.com/watch?v=YvGQn4RqpIY",
       "ingredients": [
-        {"name": "bell pepper", "amount": "4 large", "importance": "primary"},
-        {"name": "tomato", "amount": "2 medium", "importance": "primary"},
-        {"name": "onion", "amount": "1 medium", "importance": "secondary"},
-        {"name": "carrot", "amount": "1 medium", "importance": "secondary"}
+        {
+          "name": "bell pepper",
+          "amount": "4 large",
+          "importance": "primary"
+        },
+        {
+          "name": "tomato",
+          "amount": "2 medium",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "carrot",
+          "amount": "1 medium",
+          "importance": "secondary"
+        }
       ],
       "steps": [
-        "Preheat oven to 190°C (375°F).",
+        "Preheat oven to 190\u00b0C (375\u00b0F).",
         "Cut the tops off the bell peppers, remove seeds.",
         "Dice the onion, carrot, and tomatoes.",
         "Cook rice according to package directions.",
-        "Sauté onion and carrot until softened (5 minutes).",
-        "Mix sautéed veggies with cooked rice and diced tomatoes.",
+        "Saut\u00e9 onion and carrot until softened (5 minutes).",
+        "Mix saut\u00e9ed veggies with cooked rice and diced tomatoes.",
         "Season with salt, pepper, and herbs.",
         "Stuff each pepper, place in a baking dish.",
         "Bake for 25 minutes until peppers are tender."
@@ -134,14 +228,32 @@
       "category": "dinner",
       "difficulty": "medium",
       "time_minutes": 30,
-      "tags": ["vegetarian"],
-      "image": "/assets/images/frittata.jpg",
-      "video_url": "https://www.pexels.com/video/cooking-egg-dish-4253312/",
+      "tags": [
+        "vegetarian"
+      ],
+      "image": "/assets/images/frittata.png",
+      "video_url": "https://www.youtube.com/watch?v=ic70lzv6y3c",
       "ingredients": [
-        {"name": "potato", "amount": "2 medium", "importance": "primary"},
-        {"name": "egg", "amount": "6 large", "importance": "primary"},
-        {"name": "onion", "amount": "1 medium", "importance": "secondary"},
-        {"name": "bell pepper", "amount": "1/2 diced", "importance": "secondary"}
+        {
+          "name": "potato",
+          "amount": "2 medium",
+          "importance": "primary"
+        },
+        {
+          "name": "egg",
+          "amount": "6 large",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1/2 diced",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Peel and thinly slice the potatoes.",
@@ -161,13 +273,29 @@
       "category": "lunch",
       "difficulty": "easy",
       "time_minutes": 15,
-      "tags": ["vegetarian", "quick", "beginner"],
-      "image": "/assets/images/bruschetta.jpg",
-      "video_url": "https://www.pexels.com/video/close-up-of-bruschetta-3297198/",
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner"
+      ],
+      "image": "/assets/images/bruschetta.png",
+      "video_url": "https://www.youtube.com/watch?v=Q3xg35pcLyo",
       "ingredients": [
-        {"name": "tomato", "amount": "4 ripe", "importance": "primary"},
-        {"name": "onion", "amount": "1/4 small red", "importance": "secondary"},
-        {"name": "lemon", "amount": "1/2 (juice)", "importance": "secondary"}
+        {
+          "name": "tomato",
+          "amount": "4 ripe",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1/4 small red",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1/2 (juice)",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Dice the tomatoes into small cubes.",
@@ -181,44 +309,44 @@
       ]
     },
     {
-      "id": "apple-crumble",
-      "title": "Classic Apple Crumble",
-      "category": "dessert",
-      "difficulty": "easy",
-      "time_minutes": 40,
-      "tags": ["vegetarian", "beginner"],
-      "image": "/assets/images/apple-crumble.jpg",
-      "video_url": "https://www.pexels.com/video/baking-dessert-4349949/",
-      "ingredients": [
-        {"name": "apple", "amount": "4 large", "importance": "primary"},
-        {"name": "lemon", "amount": "1 (juice)", "importance": "secondary"}
-      ],
-      "steps": [
-        "Preheat oven to 180°C (350°F).",
-        "Peel, core, and slice the apples.",
-        "Toss apple slices with lemon juice, sugar, and cinnamon.",
-        "Spread apples in a baking dish.",
-        "Mix flour, oats, brown sugar, and cold butter with fingertips.",
-        "Crumble the topping evenly over the apples.",
-        "Bake for 30 minutes until golden and bubbling.",
-        "Serve warm with vanilla ice cream or custard."
-      ]
-    },
-    {
       "id": "cucumber-gazpacho",
       "title": "Cool Cucumber Gazpacho",
       "category": "lunch",
       "difficulty": "easy",
       "time_minutes": 15,
-      "tags": ["vegetarian", "quick", "healthy"],
-      "image": "/assets/images/gazpacho.jpg",
-      "video_url": "https://www.pexels.com/video/soup-bowl-serving-4058073/",
+      "tags": [
+        "vegetarian",
+        "quick",
+        "healthy"
+      ],
+      "image": "/assets/images/gazpacho.png",
+      "video_url": "https://www.youtube.com/watch?v=akhY_jn4RHc",
       "ingredients": [
-        {"name": "cucumber", "amount": "2 large", "importance": "primary"},
-        {"name": "tomato", "amount": "2 medium", "importance": "secondary"},
-        {"name": "bell pepper", "amount": "1 green", "importance": "secondary"},
-        {"name": "onion", "amount": "1/4 small", "importance": "secondary"},
-        {"name": "lemon", "amount": "1 (juice)", "importance": "secondary"}
+        {
+          "name": "cucumber",
+          "amount": "2 large",
+          "importance": "primary"
+        },
+        {
+          "name": "tomato",
+          "amount": "2 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1 green",
+          "importance": "secondary"
+        },
+        {
+          "name": "onion",
+          "amount": "1/4 small",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1 (juice)",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Roughly chop cucumber, tomato, bell pepper, and onion.",
@@ -236,14 +364,33 @@
       "category": "dinner",
       "difficulty": "easy",
       "time_minutes": 15,
-      "tags": ["quick", "beginner"],
-      "image": "/assets/images/fried-rice.jpg",
-      "video_url": "https://www.pexels.com/video/stir-fry-cooking-4253312/",
+      "tags": [
+        "quick",
+        "beginner"
+      ],
+      "image": "/assets/images/fried-rice.png",
+      "video_url": "https://www.youtube.com/watch?v=8kFT7b5qTK0",
       "ingredients": [
-        {"name": "egg", "amount": "3 large", "importance": "primary"},
-        {"name": "carrot", "amount": "1 medium diced", "importance": "secondary"},
-        {"name": "onion", "amount": "1 small diced", "importance": "secondary"},
-        {"name": "bell pepper", "amount": "1/2 diced", "importance": "secondary"}
+        {
+          "name": "egg",
+          "amount": "3 large",
+          "importance": "primary"
+        },
+        {
+          "name": "carrot",
+          "amount": "1 medium diced",
+          "importance": "secondary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 small diced",
+          "importance": "secondary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1/2 diced",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Cook rice and let it cool (day-old rice works best).",
@@ -262,16 +409,31 @@
       "category": "dinner",
       "difficulty": "easy",
       "time_minutes": 45,
-      "tags": ["vegetarian", "beginner"],
-      "image": "/assets/images/roasted-potatoes.jpg",
-      "video_url": "https://www.pexels.com/video/baking-potatoes-4253729/",
+      "tags": [
+        "vegetarian",
+        "beginner"
+      ],
+      "image": "/assets/images/roasted-potatoes.png",
+      "video_url": "https://www.youtube.com/watch?v=o1wZnJZm7dk",
       "ingredients": [
-        {"name": "potato", "amount": "1kg", "importance": "primary"},
-        {"name": "lemon", "amount": "2 (juice + zest)", "importance": "primary"},
-        {"name": "onion", "amount": "1 quartered", "importance": "secondary"}
+        {
+          "name": "potato",
+          "amount": "1kg",
+          "importance": "primary"
+        },
+        {
+          "name": "lemon",
+          "amount": "2 (juice + zest)",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 quartered",
+          "importance": "secondary"
+        }
       ],
       "steps": [
-        "Preheat oven to 200°C (400°F).",
+        "Preheat oven to 200\u00b0C (400\u00b0F).",
         "Peel and cut potatoes into wedges.",
         "Quarter the onion.",
         "Toss potatoes and onion with olive oil, lemon juice, and zest.",
@@ -287,15 +449,40 @@
       "category": "lunch",
       "difficulty": "easy",
       "time_minutes": 10,
-      "tags": ["vegetarian", "quick", "beginner", "healthy"],
-      "image": "/assets/images/salsa.jpg",
-      "video_url": "https://www.pexels.com/video/cutting-vegetables-3195394/",
+      "tags": [
+        "vegetarian",
+        "quick",
+        "beginner",
+        "healthy"
+      ],
+      "image": "/assets/images/salsa.png",
+      "video_url": "https://www.youtube.com/watch?v=2hUXWDpe_eI",
       "ingredients": [
-        {"name": "tomato", "amount": "4 ripe", "importance": "primary"},
-        {"name": "onion", "amount": "1/2 medium", "importance": "primary"},
-        {"name": "bell pepper", "amount": "1 small", "importance": "secondary"},
-        {"name": "lemon", "amount": "1 (juice)", "importance": "secondary"},
-        {"name": "cucumber", "amount": "1/2 diced", "importance": "secondary"}
+        {
+          "name": "tomato",
+          "amount": "4 ripe",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1/2 medium",
+          "importance": "primary"
+        },
+        {
+          "name": "bell pepper",
+          "amount": "1 small",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1 (juice)",
+          "importance": "secondary"
+        },
+        {
+          "name": "cucumber",
+          "amount": "1/2 diced",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Finely dice the tomatoes, onion, bell pepper, and cucumber.",
@@ -313,19 +500,32 @@
       "category": "breakfast",
       "difficulty": "easy",
       "time_minutes": 10,
-      "tags": ["vegetarian", "quick", "healthy", "beginner"],
-      "image": "/assets/images/smoothie-bowl.jpg",
-      "video_url": "https://www.pexels.com/video/making-smoothie-3252128/",
+      "tags": [
+        "vegetarian",
+        "quick",
+        "healthy",
+        "beginner"
+      ],
+      "image": "/assets/images/smoothie-bowl.png",
+      "video_url": "https://www.youtube.com/watch?v=ZHLVI0TKwPQ",
       "ingredients": [
-        {"name": "banana", "amount": "2 frozen", "importance": "primary"},
-        {"name": "apple", "amount": "1 sliced for topping", "importance": "secondary"}
+        {
+          "name": "banana",
+          "amount": "2 frozen",
+          "importance": "primary"
+        },
+        {
+          "name": "banana",
+          "amount": "1 extra for topping",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Slice bananas and freeze overnight.",
         "Blend frozen bananas with a splash of milk until thick and creamy.",
         "Pour into a bowl.",
-        "Thinly slice the apple for topping.",
-        "Add sliced apple, granola, and a drizzle of honey on top.",
+        "Thinly slice the extra banana for topping.",
+        "Add sliced banana, granola, and a drizzle of honey on top.",
         "Sprinkle with chia seeds or shredded coconut.",
         "Serve immediately before it melts."
       ]
@@ -336,18 +536,37 @@
       "category": "dinner",
       "difficulty": "medium",
       "time_minutes": 40,
-      "tags": ["vegetarian", "healthy"],
-      "image": "/assets/images/potato-soup.jpg",
-      "video_url": "https://www.pexels.com/video/cooking-soup-4058073/",
+      "tags": [
+        "vegetarian",
+        "healthy"
+      ],
+      "image": "/assets/images/potato-soup.png",
+      "video_url": "https://www.youtube.com/watch?v=bjDcgKY3zv0",
       "ingredients": [
-        {"name": "potato", "amount": "4 large", "importance": "primary"},
-        {"name": "onion", "amount": "1 large", "importance": "primary"},
-        {"name": "carrot", "amount": "2 medium", "importance": "secondary"},
-        {"name": "lemon", "amount": "1/2 (juice)", "importance": "secondary"}
+        {
+          "name": "potato",
+          "amount": "4 large",
+          "importance": "primary"
+        },
+        {
+          "name": "onion",
+          "amount": "1 large",
+          "importance": "primary"
+        },
+        {
+          "name": "carrot",
+          "amount": "2 medium",
+          "importance": "secondary"
+        },
+        {
+          "name": "lemon",
+          "amount": "1/2 (juice)",
+          "importance": "secondary"
+        }
       ],
       "steps": [
         "Peel and dice the potatoes, onion, and carrots.",
-        "Sauté the onion in butter until golden (5 minutes).",
+        "Saut\u00e9 the onion in butter until golden (5 minutes).",
         "Add potatoes and carrots, cook for 3 minutes.",
         "Pour in 1L vegetable stock and bring to a boil.",
         "Simmer for 20 minutes until potatoes are fork-tender.",
